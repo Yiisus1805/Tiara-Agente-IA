@@ -8,16 +8,17 @@ transforme preguntas comerciales (por ejemplo, "¿Por qué no alcanzamos nuestro
 - **Integración del esquema de base de datos:**
 cargue y almacene en caché automáticamente el esquema de base de datos para garantizar que las consultas SQL hagan referencia únicamente a tablas y columnas válidas.
 
--- **Ejecución de consultas SQLite**:
+- **Ejecución de consultas SQLite**:
 ejecuta consultas SQL en una base de datos SQLite (o alternativa) y devuelve los resultados en formato JSON.
 
--- **Visualización de datos**:
+- **Visualización de datos**:
 genere gráficos basados ​​en resultados de consultas 
 
 - **Interfaz web:**
 una interfaz Flask simple y responsiva permite a los usuarios ingresar sus preguntas, enviarlas y ver los resultados junto con visualizaciones.
 
 ## Estructura del Proyecto
+```
 ├── backend/
 │   ├── vanna_chromadb/    # Carpeta donde vivirá el RAG – hay que probar si se genera automático 
 │   ├── app.py             # Tu API con FastAPI
@@ -33,4 +34,5 @@ una interfaz Flask simple y responsiva permite a los usuarios ingresar sus pregu
 │   │       └── chat.js
 ├── Dockerfile             # 
 └── requirements.txt       # 
+```
 
