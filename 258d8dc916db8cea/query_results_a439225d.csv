@@ -1,0 +1,5 @@
+venta_id,fecha_venta,total,cliente_nombre,vendedor_nombre
+7,2024-03-01,90.0,Miguel Castillo,Mario López
+8,2024-03-07,75.0,Paola Jiménez,Valeria Cruz
+9,2024-03-15,850.0,Ricardo Morales,Andrés Pineda
+10,2024-03-22,60.0,Elena Vásquez,Natalia Vega

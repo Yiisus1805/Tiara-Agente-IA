@@ -1,0 +1,37 @@
+ProductID,Name,ProductNumber,Color,StandardCost,ListPrice,Size,Weight
+797,"Road-550-W Yellow, 38",BK-R64Y-38,Yellow,713.0798,1120.49,38,7869.79
+798,"Road-550-W Yellow, 40",BK-R64Y-40,Yellow,713.0798,1120.49,40,8060.29
+799,"Road-550-W Yellow, 42",BK-R64Y-42,Yellow,713.0798,1120.49,42,8223.59
+800,"Road-550-W Yellow, 44",BK-R64Y-44,Yellow,713.0798,1120.49,44,8355.13
+801,"Road-550-W Yellow, 48",BK-R64Y-48,Yellow,713.0798,1120.49,48,8473.06
+822,"ML Road Frame-W - Yellow, 38",FR-R72Y-38,Yellow,360.9428,594.83,38,988.83
+833,"ML Road Frame-W - Yellow, 40",FR-R72Y-40,Yellow,360.9428,594.83,40,1006.97
+834,"ML Road Frame-W - Yellow, 42",FR-R72Y-42,Yellow,360.9428,594.83,42,1025.11
+835,"ML Road Frame-W - Yellow, 44",FR-R72Y-44,Yellow,360.9428,594.83,44,1043.26
+836,"ML Road Frame-W - Yellow, 48",FR-R72Y-48,Yellow,360.9428,594.83,48,1061.4
+881,"Short-Sleeve Classic Jersey, S",SJ-0194-S,Yellow,41.5723,53.99,S,
+882,"Short-Sleeve Classic Jersey, M",SJ-0194-M,Yellow,41.5723,53.99,M,
+883,"Short-Sleeve Classic Jersey, L",SJ-0194-L,Yellow,41.5723,53.99,L,
+884,"Short-Sleeve Classic Jersey, XL",SJ-0194-X,Yellow,41.5723,53.99,XL,
+885,"HL Touring Frame - Yellow, 60",FR-T98Y-60,Yellow,601.7437,1003.91,60,1397.06
+886,"LL Touring Frame - Yellow, 62",FR-T67Y-62,Yellow,199.8519,333.42,62,1451.49
+887,"HL Touring Frame - Yellow, 46",FR-T98Y-46,Yellow,601.7437,1003.91,46,1342.63
+888,"HL Touring Frame - Yellow, 50",FR-T98Y-50,Yellow,601.7437,1003.91,50,1360.77
+889,"HL Touring Frame - Yellow, 54",FR-T98Y-54,Yellow,601.7437,1003.91,54,1378.91
+899,"LL Touring Frame - Yellow, 44",FR-T67Y-44,Yellow,199.8519,333.42,44,1369.84
+900,"LL Touring Frame - Yellow, 50",FR-T67Y-50,Yellow,199.8519,333.42,50,1406.13
+901,"LL Touring Frame - Yellow, 54",FR-T67Y-54,Yellow,199.8519,333.42,54,1424.27
+902,"LL Touring Frame - Yellow, 58",FR-T67Y-58,Yellow,199.8519,333.42,58,1433.34
+954,"Touring-1000 Yellow, 46",BK-T79Y-46,Yellow,1481.9379,2384.07,46,11398.72
+955,"Touring-1000 Yellow, 50",BK-T79Y-50,Yellow,1481.9379,2384.07,50,11530.26
+956,"Touring-1000 Yellow, 54",BK-T79Y-54,Yellow,1481.9379,2384.07,54,11648.19
+957,"Touring-1000 Yellow, 60",BK-T79Y-60,Yellow,1481.9379,2384.07,60,11747.98
+961,"Touring-3000 Yellow, 44",BK-T18Y-44,Yellow,461.4448,742.35,44,13049.78
+962,"Touring-3000 Yellow, 50",BK-T18Y-50,Yellow,461.4448,742.35,50,13213.08
+963,"Touring-3000 Yellow, 54",BK-T18Y-54,Yellow,461.4448,742.35,54,13344.62
+964,"Touring-3000 Yellow, 58",BK-T18Y-58,Yellow,461.4448,742.35,58,13512.45
+965,"Touring-3000 Yellow, 62",BK-T18Y-62,Yellow,461.4448,742.35,62,13607.7
+973,"Road-350-W Yellow, 40",BK-R79Y-40,Yellow,1082.51,1700.99,40,6962.61
+974,"Road-350-W Yellow, 42",BK-R79Y-42,Yellow,1082.51,1700.99,42,7153.11
+975,"Road-350-W Yellow, 44",BK-R79Y-44,Yellow,1082.51,1700.99,44,7316.41
+976,"Road-350-W Yellow, 48",BK-R79Y-48,Yellow,1082.51,1700.99,48,7447.95
