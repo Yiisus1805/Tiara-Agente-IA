@@ -1,0 +1,90 @@
+ProductID,Name,ProductNumber,Color
+680,"HL Road Frame - Black, 58",FR-R92B-58,Black
+708,"Sport-100 Helmet, Black",HL-U509,Black
+722,"LL Road Frame - Black, 58",FR-R38B-58,Black
+723,"LL Road Frame - Black, 60",FR-R38B-60,Black
+724,"LL Road Frame - Black, 62",FR-R38B-62,Black
+736,"LL Road Frame - Black, 44",FR-R38B-44,Black
+737,"LL Road Frame - Black, 48",FR-R38B-48,Black
+738,"LL Road Frame - Black, 52",FR-R38B-52,Black
+743,"HL Mountain Frame - Black, 42",FR-M94B-42,Black
+744,"HL Mountain Frame - Black, 44",FR-M94B-44,Black
+745,"HL Mountain Frame - Black, 48",FR-M94B-48,Black
+746,"HL Mountain Frame - Black, 46",FR-M94B-46,Black
+747,"HL Mountain Frame - Black, 38",FR-M94B-38,Black
+765,"Road-650 Black, 58",BK-R50B-58,Black
+766,"Road-650 Black, 60",BK-R50B-60,Black
+767,"Road-650 Black, 62",BK-R50B-62,Black
+768,"Road-650 Black, 44",BK-R50B-44,Black
+769,"Road-650 Black, 48",BK-R50B-48,Black
+770,"Road-650 Black, 52",BK-R50B-52,Black
+775,"Mountain-100 Black, 38",BK-M82B-38,Black
+776,"Mountain-100 Black, 42",BK-M82B-42,Black
+777,"Mountain-100 Black, 44",BK-M82B-44,Black
+778,"Mountain-100 Black, 48",BK-M82B-48,Black
+782,"Mountain-200 Black, 38",BK-M68B-38,Black
+783,"Mountain-200 Black, 42",BK-M68B-42,Black
+784,"Mountain-200 Black, 46",BK-M68B-46,Black
+785,"Mountain-300 Black, 38",BK-M47B-38,Black
+786,"Mountain-300 Black, 40",BK-M47B-40,Black
+787,"Mountain-300 Black, 44",BK-M47B-44,Black
+788,"Mountain-300 Black, 48",BK-M47B-48,Black
+793,"Road-250 Black, 44",BK-R89B-44,Black
+794,"Road-250 Black, 48",BK-R89B-48,Black
+795,"Road-250 Black, 52",BK-R89B-52,Black
+796,"Road-250 Black, 58",BK-R89B-58,Black
+814,"ML Mountain Frame - Black, 38",FR-M63B-38,Black
+815,LL Mountain Front Wheel,FW-M423,Black
+816,ML Mountain Front Wheel,FW-M762,Black
+817,HL Mountain Front Wheel,FW-M928,Black
+818,LL Road Front Wheel,FW-R623,Black
+819,ML Road Front Wheel,FW-R762,Black
+820,HL Road Front Wheel,FW-R820,Black
+821,Touring Front Wheel,FW-T905,Black
+823,LL Mountain Rear Wheel,RW-M423,Black
+824,ML Mountain Rear Wheel,RW-M762,Black
+825,HL Mountain Rear Wheel,RW-M928,Black
+826,LL Road Rear Wheel,RW-R623,Black
+827,ML Road Rear Wheel,RW-R762,Black
+828,HL Road Rear Wheel,RW-R820,Black
+829,Touring Rear Wheel,RW-T905,Black
+830,"ML Mountain Frame - Black, 40",FR-M63B-40,Black
+831,"ML Mountain Frame - Black, 44",FR-M63B-44,Black
+832,"ML Mountain Frame - Black, 48",FR-M63B-48,Black
+837,"HL Road Frame - Black, 62",FR-R92B-62,Black
+838,"HL Road Frame - Black, 44",FR-R92B-44,Black
+839,"HL Road Frame - Black, 48",FR-R92B-48,Black
+840,"HL Road Frame - Black, 52",FR-R92B-52,Black
+841,"Men's Sports Shorts, S",SH-M897-S,Black
+849,"Men's Sports Shorts, M",SH-M897-M,Black
+850,"Men's Sports Shorts, L",SH-M897-L,Black
+851,"Men's Sports Shorts, XL",SH-M897-X,Black
+852,"Women's Tights, S",TG-W091-S,Black
+853,"Women's Tights, M",TG-W091-M,Black
+854,"Women's Tights, L",TG-W091-L,Black
+858,"Half-Finger Gloves, S",GL-H102-S,Black
+859,"Half-Finger Gloves, M",GL-H102-M,Black
+860,"Half-Finger Gloves, L",GL-H102-L,Black
+861,"Full-Finger Gloves, S",GL-F110-S,Black
+862,"Full-Finger Gloves, M",GL-F110-M,Black
+863,"Full-Finger Gloves, L",GL-F110-L,Black
+867,"Women's Mountain Shorts, S",SH-W890-S,Black
+868,"Women's Mountain Shorts, M",SH-W890-M,Black
+869,"Women's Mountain Shorts, L",SH-W890-L,Black
+924,"LL Mountain Frame - Black, 42",FR-M21B-42,Black
+925,"LL Mountain Frame - Black, 44",FR-M21B-44,Black
+926,"LL Mountain Frame - Black, 48",FR-M21B-48,Black
+927,"LL Mountain Frame - Black, 52",FR-M21B-52,Black
+943,"LL Mountain Frame - Black, 40",FR-M21B-40,Black
+949,LL Crankset,CS-4759,Black
+950,ML Crankset,CS-6583,Black
+951,HL Crankset,CS-9183,Black
+977,"Road-750 Black, 58",BK-R19B-58,Black
+989,"Mountain-500 Black, 40",BK-M18B-40,Black
+990,"Mountain-500 Black, 42",BK-M18B-42,Black
+991,"Mountain-500 Black, 44",BK-M18B-44,Black
+992,"Mountain-500 Black, 48",BK-M18B-48,Black
+993,"Mountain-500 Black, 52",BK-M18B-52,Black
+997,"Road-750 Black, 44",BK-R19B-44,Black
+998,"Road-750 Black, 48",BK-R19B-48,Black
+999,"Road-750 Black, 52",BK-R19B-52,Black
