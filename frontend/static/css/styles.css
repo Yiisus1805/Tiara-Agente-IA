@@ -108,6 +108,12 @@ body {
   line-height: 1.45;
 }
 
+/* Cuando el contenido tiene tabla, ocupar todo el ancho disponible */
+.message.assistant .message-content:has(.table-wrapper) {
+  display: block;
+  max-width: 100%;
+}
+
 .message.user .message-content {
   background: linear-gradient(
     135deg,
@@ -144,15 +150,17 @@ body {
 .table-wrapper {
   overflow-x: auto;
   max-width: 100%;
-  margin: 15px 0;
+  margin: 8px 0;
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  /* Limitar altura máxima con scroll vertical */
+  max-height: 260px;
+  overflow-y: auto;
 }
 
 .message.assistant .message-content table.data-table {
   border-collapse: collapse;
-  width: auto;
-  min-width: 100%;
+  width: 100%;
   background: white;
   border-radius: 8px;
   overflow: hidden;
@@ -160,23 +168,27 @@ body {
 
 .message.assistant .message-content table.data-table thead {
   background: linear-gradient(135deg, #FF650A 0%, #FF8A3D 100%);
+  /* Header fijo al hacer scroll vertical */
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .message.assistant .message-content table.data-table th {
   color: white;
-  padding: 14px 12px;
+  padding: 8px 10px;
   text-align: left;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   white-space: nowrap;
 }
 
 .message.assistant .message-content table.data-table td {
-  padding: 12px;
+  padding: 7px 10px;
   border-bottom: 1px solid #E1E8EF;
-  font-size: 13px;
+  font-size: 12px;
   color: #003274;
   white-space: nowrap;
 }

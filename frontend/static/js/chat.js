@@ -1,4 +1,4 @@
-const conversationId = 'session-' + Date.now();
+let conversationId = 'session-' + Date.now();
 let useStreaming = true;
 
 function addMessage(role, content, toolCalls = null) {
@@ -15,12 +15,11 @@ function addMessage(role, content, toolCalls = null) {
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/<table/g, '<div class="table-wrapper"><table')
     .replace(/<\/table>/g, '</table></div>')
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')   // negritas
-    .replace(/\*(.*?)\*/g, '<em>$1</em>')               // cursivas
-    .replace(/`([^`]+)`/g, '<code>$1</code>')           // código
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/```sql\n([\s\S]+?)```/g, '<pre><code>$1</code></pre>')
     .replace(/```([\s\S]+?)```/g, '<pre><code>$1</code></pre>')
-    .replace(/\n/g, '<br>')
     .replace(/\n/g, '<br>');
 
   html += formattedContent;
@@ -114,8 +113,6 @@ async function sendMessageStreaming(question) {
 
     if (!response.ok) throw new Error('Error en la respuesta');
 
-    // NO llamar hideLoading() aquí todavía
-
     const messagesDiv = document.getElementById('messages');
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message assistant';
@@ -132,7 +129,7 @@ async function sendMessageStreaming(question) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let firstChunk = true;  
+    let firstChunk = true;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -149,8 +146,8 @@ async function sendMessageStreaming(question) {
 
         if (data.type === 'content') {
           if (firstChunk) {
-            hideLoading();                          
-            messagesDiv.appendChild(messageDiv);    
+            hideLoading();
+            messagesDiv.appendChild(messageDiv);
             firstChunk = false;
           }
           const wrapped = data.content
@@ -204,15 +201,14 @@ function handleKeyPress(event) {
   if (event.key === 'Enter') sendMessage();
 }
 
-async function clearConversation() {
-  if (!confirm('¿Limpiar la conversación?')) return;
+const WELCOME_MSG = 'Bienvenido a TIARA  ¿En qué puedo ayudarte hoy?';
 
-  try {
-    await fetch(`/api/tiara/conversations/${conversationId}`, { method: 'DELETE' });
-    document.getElementById('messages').innerHTML = '';
-  } catch (error) {
-    showError('Error al limpiar conversación');
-  }
+function newConversation() {
+  conversationId = 'session-' + Date.now();
+  document.getElementById('messages').innerHTML = '';
+  addMessage('assistant', WELCOME_MSG);
+  document.getElementById('questionInput').focus();
 }
 
 document.getElementById('questionInput').focus();
+addMessage('assistant', WELCOME_MSG);

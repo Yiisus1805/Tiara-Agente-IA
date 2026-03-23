@@ -1,92 +1,150 @@
 import os
 import hashlib
 from urllib.parse import quote_plus
+from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-from schema_store import SchemaVectorStore
+from backend.schema_store import SchemaVectorStore
 
 
 def stable_id(s: str) -> str:
-    """ID estable para upsert (si re-ingestas, actualiza en vez de duplicar)."""
+    """
+    Genera un ID estable basado en hash.
+    Esto evita duplicados cuando re-ingestamos el schema.
+    """
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
+def build_semantic_doc(table_key: str, columns: list) -> str:
+    """
+    Construye un documento semántico optimizado para RAG.
+    Esto mejora la generación de SQL por el LLM.
+    """
+    lines = []
+    lines.append(f"Tabla: {table_key}")
+    lines.append("")
+    lines.append("Columnas:")
+
+    for _, col, dtype in columns:
+        lines.append(f"- {col} ({dtype})")
+
+    return "\n".join(lines)
+
+
 def main() -> None:
-    # Carga backend/.env aunque ejecutes desde raíz
-    load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+    # ================================
+    # Cargar .env desde la raíz
+    # ================================
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    load_dotenv(env_path)
 
     odbc_str = os.getenv("SQLSERVER_ODBC")
+
     if not odbc_str:
-        raise RuntimeError("SQLSERVER_ODBC no encontrada en backend/.env")
+        raise RuntimeError("❌ SQLSERVER_ODBC no encontrada en el archivo .env")
 
-    # --- RUTA CORREGIDA ---
-    # Apuntamos a la subcarpeta 'schema_store' para no chocar con la memoria del agente
-    project_root = os.path.dirname(os.path.dirname(__file__))  # TIARA_PROJECT/
-    persist_dir = os.path.join(project_root, "backend", "vanna_chromadb", "schema_store")
-    os.makedirs(persist_dir, exist_ok=True)
+    # ================================
+    # Ruta de persistencia Chroma
+    # ================================
+    project_root = Path(__file__).resolve().parents[1]
 
-    # Colección para schema
+    persist_dir = project_root / "backend" / "vanna_chromadb" / "schema_store"
+    persist_dir.mkdir(parents=True, exist_ok=True)
+
     collection_name = os.getenv("SCHEMA_COLLECTION") or "tiara_schema"
 
+    print(f"📦 Usando colección Chroma: {collection_name}")
+    print(f"📂 Directorio persistente: {persist_dir}")
+
     store = SchemaVectorStore(
-        persist_dir=persist_dir,
+        persist_dir=str(persist_dir),
         collection_name=collection_name,
-        embedding_mode="default", 
+        embedding_mode="default",
     )
 
+    # ================================
     # Conexión SQL Server
+    # ================================
+    print("🔌 Conectando a SQL Server...")
+
     engine = create_engine(
         "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_str),
         pool_pre_ping=True,
         future=True,
     )
 
-    # Query para extraer metadatos de las tablas
+    # ================================
+    # Query para obtener schema
+    # ================================
     sql = """
-    SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION
+    SELECT 
+        TABLE_SCHEMA,
+        TABLE_NAME,
+        COLUMN_NAME,
+        DATA_TYPE,
+        ORDINAL_POSITION
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA NOT IN ('information_schema', 'sys')
     ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
     """
 
-    print(f"Conectando a la base de datos para extraer esquema...")
+    print("📊 Extrayendo metadatos del esquema...")
+
     with engine.connect() as conn:
         rows = conn.execute(text(sql)).fetchall()
 
-    # Agrupar por tabla
+    if not rows:
+        print("⚠️ No se encontraron tablas en la base de datos.")
+        return
+
     tables = {}
+
     for schema, table, col, dtype, pos in rows:
         key = f"{schema}.{table}"
         tables.setdefault(key, []).append((int(pos), str(col), str(dtype)))
+
+    print(f"📚 Tablas encontradas: {len(tables)}")
 
     ids = []
     docs = []
     metas = []
 
     for table_key, cols in tables.items():
-        # Ordenar columnas por su posición original
-        cols_sorted = sorted(cols, key=lambda x: x[0])
-        cols_txt = ", ".join([f"{c} ({t})" for _, c, t in cols_sorted])
 
-        # Formato de documento para el RAG
-        doc = f"Tabla {table_key}. Columnas: {cols_txt}."
+        cols_sorted = sorted(cols, key=lambda x: x[0])
+
+        doc = build_semantic_doc(table_key, cols_sorted)
+
         doc_id = stable_id("schema:" + table_key)
 
         ids.append(doc_id)
         docs.append(doc)
-        metas.append({"type": "schema", "table": table_key})
 
-    # Guardar en ChromaDB
+        metas.append({
+            "type": "schema",
+            "table": table_key
+        })
+
     if ids:
-        store.upsert(ids=ids, documents=docs, metadatas=metas)
-        print(f"[OK] Ingesta schema completada.")
-        print(f"     Tablas procesadas: {len(tables)}")
-        print(f"     Directorio: {persist_dir}")
-        print(f"     Documentos totales en colección: {store.count()}")
+
+        print("💾 Insertando documentos en ChromaDB...")
+
+        store.upsert(
+            ids=ids,
+            documents=docs,
+            metadatas=metas
+        )
+
+        print("")
+        print("✅ Ingesta de schema completada")
+        print(f"📊 Tablas procesadas: {len(tables)}")
+        print(f"📄 Documentos insertados: {len(ids)}")
+        print(f"📦 Total documentos en colección: {store.count()}")
+
     else:
-        print("[!] No se encontraron tablas para ingestar. Revisa tu conexión u ODBC.")
+        print("⚠️ No se generaron documentos para ingestar.")
 
 
 if __name__ == "__main__":
