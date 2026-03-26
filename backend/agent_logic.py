@@ -534,7 +534,7 @@ async def run_agent_stream_text(
 # BUILD AGENT
 
 def build_agent() -> Agent:
-    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=False)
 
     project_root = os.path.dirname(os.path.dirname(__file__))
     base_persist_dir = os.path.join(project_root, "backend", "vanna_chromadb")

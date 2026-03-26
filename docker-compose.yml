@@ -1,0 +1,51 @@
+services:
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04
+    container_name: tiara-sqlserver
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=${SA_PASSWORD}
+    ports:
+      - "1433:1433"
+    volumes:
+      - sql_data:/var/opt/mssql
+      - ./db-backup:/var/opt/mssql/backup
+      - ./entrypoint.sh:/entrypoint.sh
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P $$SA_PASSWORD -C -Q \"SELECT 1\""]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  tiara-backend:
+    build: .
+    container_name: tiara-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+      - ./start.sh:/app/start.sh
+      - chromadb_data:/app/backend/vanna_chromadb
+
+  tiara-nginx:
+    image: nginx:alpine
+    container_name: tiara-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - tiara-backend
+
+volumes:
+  sql_data:
+  chromadb_data:
