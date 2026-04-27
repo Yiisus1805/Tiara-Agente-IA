@@ -10,12 +10,8 @@ from chromadb.utils import embedding_functions
 
 class SchemaVectorStore:
     """
-    Vector store persistente (ChromaDB) para conocimiento técnico de esquema/DDL.
-
-    - Guarda documentos como:
-        "Tabla dbo.Ventas. Columnas: cliente_id (int), fecha_venta (date), total (decimal)..."
-
-    - Recupera documentos relevantes por similitud semántica (embeddings locales).
+    Vector store para almacenar conocimiento del esquema SQL
+    optimizado para RAG SQL agents.
     """
 
     def __init__(
@@ -24,42 +20,67 @@ class SchemaVectorStore:
         collection_name: str = "tiara_schema",
         embedding_mode: str = "default",
     ):
-        # Aseguramos que el directorio exista antes de inicializar el cliente
+
         os.makedirs(persist_dir, exist_ok=True)
 
         self.persist_dir = persist_dir
         self.collection_name = collection_name
 
-        # Inicialización del cliente persistente
         self.client = chromadb.PersistentClient(
             path=persist_dir,
-            settings=Settings(anonymized_telemetry=False, allow_reset=False),
+            settings=Settings(
+                anonymized_telemetry=False,
+                allow_reset=True,
+            ),
         )
 
-        # Usamos la función de embedding por defecto (all-MiniLM-L6-v2)
         if embedding_mode != "default":
-            raise ValueError("Para esquema local, usa embedding_mode='default'.")
-
-        self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
-
-        # Obtener o crear colección.
-        try:
-            # Intentamos obtener la colección existente
-            self.col = self.client.get_collection(
-                name=collection_name, 
-                embedding_function=self.embedding_function
+            raise ValueError(
+                "Para esquema local usa embedding_mode='default'"
             )
+
+        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="paraphrase-multilingual-MiniLM-L12-v2"
+)
+
+        # Si la colección existente no tiene hnsw:space=cosine, la recreamos
+        try:
+            existing = self.client.get_collection(
+                name=collection_name,
+                embedding_function=self.embedding_function,
+            )
+            existing_space = (existing.metadata or {}).get("hnsw:space", "l2")
+            if existing_space != "cosine":
+                self.client.delete_collection(collection_name)
+                raise Exception("Colección recreada con cosine")
+            self.col = existing
+
         except Exception:
-            # Si no existe, la creamos
             self.col = self.client.create_collection(
                 name=collection_name,
                 embedding_function=self.embedding_function,
-                metadata={"description": "TIARA schema/DDL vector memory"},
+                metadata={
+                    "description": "TIARA SQL schema vector store",
+                    "hnsw:space": "cosine",
+                },
             )
 
-    def upsert(self, ids: List[str], documents: List[str], metadatas: List[Dict[str, Any]]) -> None:
-        """Inserta o actualiza documentos en la base vectorial."""
-        self.col.upsert(ids=ids, documents=documents, metadatas=metadatas)
+    def upsert(
+        self,
+        ids: List[str],
+        documents: List[str],
+        metadatas: List[Dict[str, Any]],
+    ) -> None:
+
+        if not ids:
+            return
+
+        self.col.upsert(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+        )
+
 
     def query(
         self,
@@ -67,41 +88,123 @@ class SchemaVectorStore:
         k: int = 8,
         where: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Busca los fragmentos de esquema más relevantes.
-        Devuelve lista de hits:
-            [{"id": ..., "doc": ..., "meta": ..., "distance": ...}, ...]
-        """
+
         query_text = (query_text or "").strip()
+
         if not query_text:
             return []
 
-        # CORRECCIÓN: Eliminamos "ids" de include porque se devuelven siempre por defecto
-        # en las versiones nuevas de ChromaDB.
+        # Chroma no acepta n_results mayor al número de documentos
+        total = self.count()
+        if total <= 0:
+            return []
+        n_results = min(k, total)
+
         res = self.col.query(
             query_texts=[query_text],
-            n_results=k,
+            n_results=n_results,
             where=where,
             include=["documents", "metadatas", "distances"],
         )
 
-        # Extraemos las listas de la respuesta (Chroma devuelve listas de listas)
         docs = res.get("documents", [[]])[0]
         metas = res.get("metadatas", [[]])[0]
         dists = res.get("distances", [[]])[0]
-        ids = res.get("ids", [[]])[0] # Los IDs se recuperan así
+        ids = res.get("ids", [[]])[0]
 
-        out: List[Dict[str, Any]] = []
-        # El zip ahora tiene todos los elementos necesarios
+        results: List[Dict[str, Any]] = []
+
         for id_, doc, meta, dist in zip(ids, docs, metas, dists):
-            out.append({"id": id_, "doc": doc, "meta": meta, "distance": dist})
-        
-        return out
+
+            # Distancia cosine en Chroma va de 0 a 2:
+            #   0   = vectores idénticos  → similitud 1.0
+            #   1   = ortogonales         → similitud 0.5
+            #   2   = opuestos            → similitud 0.0
+            similarity = 1.0 - (dist / 2.0) if dist is not None else 0.0
+
+            results.append(
+                {
+                    "id": id_,
+                    "doc": doc,
+                    "meta": meta,
+                    "distance": dist,
+                    "score": similarity,
+                }
+            )
+
+        return results
+
+
+    def smart_query(
+        self,
+        query_text: str,
+        k_fetch: int = 12,
+        k_final: int = 6,
+    ) -> List[Dict[str, Any]]:
+
+        hits = self.query(query_text, k=k_fetch)
+
+        if not hits:
+            return []
+
+        # Ordenar por similitud descendente
+        hits.sort(key=lambda x: x["score"], reverse=True)
+
+        seen_tables = set()
+        filtered: List[Dict[str, Any]] = []
+
+        for h in hits:
+
+            meta = h.get("meta") or {}
+            table = meta.get("table")
+
+            if table and table in seen_tables:
+                continue
+
+            if table:
+                seen_tables.add(table)
+
+            filtered.append(h)
+
+            if len(filtered) >= k_final:
+                break
+
+        return filtered
+
 
     def count(self) -> int:
-        """Devuelve el número de documentos cargados en la colección."""
+
         try:
             return int(self.col.count())
         except Exception:
             return -1
 
+    def reset(self) -> None:
+        try:
+            self.client.delete_collection(self.collection_name)
+            self.col = self.client.create_collection(
+                name=self.collection_name,
+                embedding_function=self.embedding_function,
+                metadata={
+                    "description": "TIARA SQL schema vector store",
+                    "hnsw:space": "cosine",
+                },
+            )
+        except Exception as e:
+            raise RuntimeError(f"Error reseteando colección: {e}") from e
+
+
+    def preview(self, n: int = 5):
+
+        try:
+
+            res = self.col.get(limit=n)
+
+            docs = res.get("documents", [])
+
+            for i, d in enumerate(docs):
+                print(f"\n--- DOC {i+1} ---\n")
+                print(d[:500])
+
+        except Exception:
+            print("No se pudo mostrar preview")

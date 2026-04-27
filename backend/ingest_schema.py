@@ -1,151 +1,270 @@
-import os
-import hashlib
-from urllib.parse import quote_plus
-from pathlib import Path
+from __future__ import annotations
 
+import os
+import pyodbc
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
 
 from backend.schema_store import SchemaVectorStore
 
+load_dotenv()
 
-def stable_id(s: str) -> str:
-    """
-    Genera un ID estable basado en hash.
-    Esto evita duplicados cuando re-ingestamos el schema.
-    """
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+ODBC = os.getenv("SQLSERVER_ODBC")
 
+SCHEMA_DIR = "backend/vanna_chromadb/schema_store"
 
-def build_semantic_doc(table_key: str, columns: list) -> str:
-    """
-    Construye un documento semántico optimizado para RAG.
-    Esto mejora la generación de SQL por el LLM.
-    """
-    lines = []
-    lines.append(f"Tabla: {table_key}")
-    lines.append("")
-    lines.append("Columnas:")
-
-    for _, col, dtype in columns:
-        lines.append(f"- {col} ({dtype})")
-
-    return "\n".join(lines)
+store = SchemaVectorStore(
+    persist_dir=SCHEMA_DIR,
+    collection_name="tiara_schema",
+    embedding_mode="default",
+)
 
 
-def main() -> None:
-    # ================================
-    # Cargar .env desde la raíz
-    # ================================
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    load_dotenv(env_path)
+# Diccionario semantico
 
-    odbc_str = os.getenv("SQLSERVER_ODBC")
+SPANISH_ALIASES = {
+    "FactInternetSales":                        "ventas internet ventas online pedidos clientes SalesAmount OrderQuantity ingresos monto total",
+    "FactResellerSales":                        "ventas reseller revendedor distribuidor SalesAmount OrderQuantity ingresos monto total",
+    "DimProduct":                               "productos articulos items ProductName nombre producto",
+    "DimProductCategory":                       "categorias de productos categoria EnglishProductCategoryName",
+    "DimProductSubcategory":                    "subcategorias de productos subcategoria EnglishProductSubcategoryName",
+    "DimCustomer":                              "clientes compradores CustomerName nombre cliente",
+    "DimDate":                                  "fechas calendario año mes dia year month CalendarYear FullDateAlternateKey fecha",
+    "DimSalesTerritory":                        "territorios regiones paises zona geografica SalesTerritoryRegion SalesTerritoryCountry",
+    "DimEmployee":                              "empleados vendedores personal EmployeeName nombre empleado",
+    "DimReseller":                              "reseller revendedor distribuidor ResellerName nombre reseller",
+    "DimGeography":                             "geografia pais ciudad estado Country City StateProvinceName",
+    "DimPromotion":                             "promociones descuentos PromotionName DiscountPct oferta",
+    "DimCurrency":                              "moneda divisa CurrencyName CurrencyAlternateKey",
+    "DimAccount":                               "cuentas contables AccountDescription AccountType",
+    "DimDepartmentGroup":                       "departamentos grupos DepartmentGroupName",
+    "DimOrganization":                          "organizacion empresa OrganizationName CurrencyKey",
+    "DimScenario":                              "escenarios presupuesto ScenarioName",
+    "FactSalesQuota":                           "cuota presupuesto objetivo meta ventas SalesAmountQuota",
+    "FactProductInventory":                     "inventario stock productos UnitsBalance MovementDate",
+    "FactFinance":                              "finanzas contabilidad Amount AccountKey",
+    "FactCallCenter":                           "call center llamadas WagesAmount LaborHours",
+    "FactCurrencyRate":                         "tipo de cambio moneda tasa AverageRate EndOfDayRate",
+    "FactInternetSalesReason":                  "razones motivos ventas internet SalesReasonKey",
+    "FactSurveyResponse":                       "encuestas respuestas SurveyResponseKey",
+    "FactAdditionalInternationalProductDescription": "descripcion internacional producto ProductDescription",
+    "FactResellerSalesXL_CCI":                  "ventas reseller copia XL CCI (no usar en produccion)",
+    "FactResellerSalesXL_PageCompressed":       "ventas reseller copia XL comprimida (no usar en produccion)",
+    "NewFactCurrencyRate":                      "tipo de cambio nuevo moneda AverageRate",
+    "ProspectiveBuyer":                         "compradores potenciales prospectos clientes futuros",
+    "DatabaseLog":                              "log base de datos auditoria cambios",
+    "AdventureWorksDWBuildVersion":             "version build base de datos",
+    "sysdiagrams":                              "diagramas sistema base de datos",
+}
 
-    if not odbc_str:
-        raise RuntimeError("❌ SQLSERVER_ODBC no encontrada en el archivo .env")
 
-    # ================================
-    # Ruta de persistencia Chroma
-    # ================================
-    project_root = Path(__file__).resolve().parents[1]
+# DB CONNECTION
 
-    persist_dir = project_root / "backend" / "vanna_chromadb" / "schema_store"
-    persist_dir.mkdir(parents=True, exist_ok=True)
+def get_connection():
+    if not ODBC:
+        raise RuntimeError("SQLSERVER_ODBC no configurado en .env")
+    return pyodbc.connect(ODBC)
 
-    collection_name = os.getenv("SCHEMA_COLLECTION") or "tiara_schema"
 
-    print(f"📦 Usando colección Chroma: {collection_name}")
-    print(f"📂 Directorio persistente: {persist_dir}")
+# TABLE LIST
 
-    store = SchemaVectorStore(
-        persist_dir=str(persist_dir),
-        collection_name=collection_name,
-        embedding_mode="default",
-    )
+def fetch_tables(cursor):
 
-    # ================================
-    # Conexión SQL Server
-    # ================================
-    print("🔌 Conectando a SQL Server...")
+    cursor.execute("""
+    SELECT
+        s.name AS schema_name,
+        t.name AS table_name
+    FROM sys.tables t
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    ORDER BY s.name, t.name
+    """)
 
-    engine = create_engine(
-        "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_str),
-        pool_pre_ping=True,
-        future=True,
-    )
+    return cursor.fetchall()
 
-    # ================================
-    # Query para obtener schema
-    # ================================
-    sql = """
-    SELECT 
-        TABLE_SCHEMA,
-        TABLE_NAME,
-        COLUMN_NAME,
-        DATA_TYPE,
-        ORDINAL_POSITION
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA NOT IN ('information_schema', 'sys')
-    ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
-    """
 
-    print("📊 Extrayendo metadatos del esquema...")
+# COLUMNS
 
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql)).fetchall()
+def fetch_columns(cursor, schema, table):
 
-    if not rows:
-        print("⚠️ No se encontraron tablas en la base de datos.")
-        return
+    cursor.execute("""
+    SELECT
+        c.name,
+        ty.name,
+        c.max_length,
+        c.is_nullable
+    FROM sys.columns c
+    JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+    JOIN sys.tables t ON c.object_id = t.object_id
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    WHERE s.name = ? AND t.name = ?
+    ORDER BY c.column_id
+    """, schema, table)
 
-    tables = {}
+    return cursor.fetchall()
 
-    for schema, table, col, dtype, pos in rows:
-        key = f"{schema}.{table}"
-        tables.setdefault(key, []).append((int(pos), str(col), str(dtype)))
 
-    print(f"📚 Tablas encontradas: {len(tables)}")
+# PRIMARY KEYS
 
-    ids = []
-    docs = []
-    metas = []
+def fetch_primary_keys(cursor, schema, table):
 
-    for table_key, cols in tables.items():
+    cursor.execute("""
+    SELECT c.name
+    FROM sys.indexes i
+    JOIN sys.index_columns ic
+        ON i.object_id = ic.object_id
+        AND i.index_id = ic.index_id
+    JOIN sys.columns c
+        ON ic.object_id = c.object_id
+        AND ic.column_id = c.column_id
+    JOIN sys.tables t
+        ON i.object_id = t.object_id
+    JOIN sys.schemas s
+        ON t.schema_id = s.schema_id
+    WHERE i.is_primary_key = 1
+      AND s.name = ?
+      AND t.name = ?
+    """, schema, table)
 
-        cols_sorted = sorted(cols, key=lambda x: x[0])
+    return [r[0] for r in cursor.fetchall()]
 
-        doc = build_semantic_doc(table_key, cols_sorted)
 
-        doc_id = stable_id("schema:" + table_key)
+# FOREIGN KEYS
 
-        ids.append(doc_id)
-        docs.append(doc)
+def fetch_fk_relations(cursor, schema, table):
 
-        metas.append({
-            "type": "schema",
-            "table": table_key
-        })
+    cursor.execute("""
+    SELECT
+        parent_col.name,
+        ref_schema.name,
+        ref_table.name,
+        ref_col.name
+    FROM sys.foreign_key_columns fk
+    JOIN sys.tables parent_table
+        ON fk.parent_object_id = parent_table.object_id
+    JOIN sys.columns parent_col
+        ON fk.parent_object_id = parent_col.object_id
+        AND fk.parent_column_id = parent_col.column_id
+    JOIN sys.tables ref_table
+        ON fk.referenced_object_id = ref_table.object_id
+    JOIN sys.columns ref_col
+        ON fk.referenced_object_id = ref_col.object_id
+        AND fk.referenced_column_id = ref_col.column_id
+    JOIN sys.schemas parent_schema
+        ON parent_table.schema_id = parent_schema.schema_id
+    JOIN sys.schemas ref_schema
+        ON ref_table.schema_id = ref_schema.schema_id
+    WHERE parent_schema.name = ?
+      AND parent_table.name = ?
+    """, schema, table)
 
-    if ids:
+    return cursor.fetchall()
 
-        print("💾 Insertando documentos en ChromaDB...")
 
-        store.upsert(
-            ids=ids,
-            documents=docs,
-            metadatas=metas
+# Detección de tipo de tabla (FACT / DIM)
+
+def detect_table_type(table_name: str):
+
+    name = table_name.lower()
+
+    if name.startswith("fact"):
+        return "Fact"
+
+    if name.startswith("dim"):
+        return "Dimension"
+
+    if "bridge" in name:
+        return "Bridge"
+
+    return "Table"
+
+
+# BUILD DOCUMENT
+
+def build_schema_doc(schema, table, columns, pks, relations):
+
+    table_type = detect_table_type(table)
+    aliases = SPANISH_ALIASES.get(table, "")
+
+    column_lines = []
+
+    for name, typ, length, nullable in columns:
+        null_txt = "NULL" if nullable else "NOT NULL"
+        column_lines.append(f"{name} ({typ}) {null_txt}")
+
+    cols = "\n".join(column_lines)
+    pk_text = ", ".join(pks) if pks else "None"
+
+    rel_lines = []
+    for r in relations:
+        rel_lines.append(f"{schema}.{table}.{r[0]} -> {r[1]}.{r[2]}.{r[3]}")
+    rels = "\n".join(rel_lines) if rel_lines else "None"
+
+    doc = f"""
+Tabla: {schema}.{table}
+
+Tipo de tabla: {table_type}
+
+Conceptos relacionados: {aliases}
+
+Columnas:
+{cols}
+
+Primary Key:
+{pk_text}
+
+Relaciones (esta tabla referencia a):
+{rels}
+
+Uso:
+- Tablas Fact contienen métricas (ventas, cantidades, montos).
+- Tablas Dim contienen atributos descriptivos.
+""".strip()
+
+    return doc
+
+# INGEST
+
+def ingest():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    tables = fetch_tables(cursor)
+
+    print(f"\nTablas encontradas: {len(tables)}\n")
+
+    count = 0
+
+    for schema, table in tables:
+
+        columns = fetch_columns(cursor, schema, table)
+        pks = fetch_primary_keys(cursor, schema, table)
+        relations = fetch_fk_relations(cursor, schema, table)
+
+        doc = build_schema_doc(
+            schema,
+            table,
+            columns,
+            pks,
+            relations,
         )
 
-        print("")
-        print("✅ Ingesta de schema completada")
-        print(f"📊 Tablas procesadas: {len(tables)}")
-        print(f"📄 Documentos insertados: {len(ids)}")
-        print(f"📦 Total documentos en colección: {store.count()}")
+        store.upsert(
+            ids=[f"{schema}.{table}"],
+            documents=[doc],
+            metadatas=[{"schema": schema, "table": table}],
+        )
 
-    else:
-        print("⚠️ No se generaron documentos para ingestar.")
+        print(f"Indexed {schema}.{table}")
+        count += 1
 
+    print(f"\nTotal tablas indexadas: {count}")
+
+# MAIN
 
 if __name__ == "__main__":
-    main()
+
+    print("\nIngestando esquema SQL → Chroma\n")
+
+    ingest()
+
+    print("\nSchema ingest terminado\n")
