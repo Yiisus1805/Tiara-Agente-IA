@@ -52,10 +52,15 @@ class SchemaVectorStore:
             existing_space = (existing.metadata or {}).get("hnsw:space", "l2")
             if existing_space != "cosine":
                 self.client.delete_collection(collection_name)
-                raise Exception("Colección recreada con cosine")
+                raise Exception("Recrear con cosine")
             self.col = existing
 
-        except Exception:
+        except ValueError:
+            # Conflicto de embedding function — borrar y recrear
+            try:
+                self.client.delete_collection(collection_name)
+            except Exception:
+                pass
             self.col = self.client.create_collection(
                 name=collection_name,
                 embedding_function=self.embedding_function,
@@ -64,6 +69,20 @@ class SchemaVectorStore:
                     "hnsw:space": "cosine",
                 },
             )
+
+        except Exception:
+            try:
+                self.col = self.client.create_collection(
+                    name=collection_name,
+                    embedding_function=self.embedding_function,
+                    metadata={
+                        "description": "TIARA SQL schema vector store",
+                        "hnsw:space": "cosine",
+                    },
+                )
+            except Exception:
+                # Si ya existe, obtenerla sin validar embedding
+                self.col = self.client.get_collection(name=collection_name)
 
     def upsert(
         self,
