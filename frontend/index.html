@@ -1,39 +1,65 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TIARA - Chat SQL</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tiara</title>
 
-  <link rel="stylesheet" href="/static/css/styles.css">
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="/static/css/styles.css">
 </head>
 
 <body>
-  <div class="container">
-    <div class="header">
-      <h1>TIARA</h1>
-      <p>SAC PANAMÁ</p>
+
+<header>
+  <div class="logo-wrap">
+
+    <img src="/static/img/SAC-Logo.jpg" class="logo-img" alt="SAC Logo">
+
+    <div class="logo-sub">
+      Servicios Avanzados de Consultoría
     </div>
 
-    <div class="messages" id="messages"></div>
-
-    <div class="input-area">
-      <div class="controls">
-        <button onclick="newConversation()">Nueva Conversación</button>
-      </div>
-
-      <div class="input-group">
-        <input
-          type="text"
-          id="questionInput"
-          placeholder="Pregunta sobre tu base de datos..."
-          onkeypress="handleKeyPress(event)"
-        >
-        <button onclick="sendMessage()" id="sendBtn">Enviar</button>
-      </div>
-    </div>
   </div>
 
-  <script src="/static/js/chat.js?v=3"></script>
+  <h1 class="header-title">Tiara</h1>
+</header>
+
+<main>
+  <div class="welcome-screen" id="welcome-screen">
+    <h2>Bienvenido a TIARA</h2>
+    <p>¿En qué puedo ayudarte hoy?</p>
+  </div>
+  <div id="chat-container"></div>
+</main>
+
+<div class="input-area">
+
+  <div class="input-inner">
+
+    <input
+      type="text"
+      id="user-input"
+      placeholder="Escribe tu pregunta aquí"
+      autocomplete="off"
+    />
+
+    <div class="btn-row">
+      <button class="btn btn-reset hidden" id="reset-btn">
+        Reiniciar Conversación
+      </button>
+
+      <button class="btn btn-send" id="send-btn">
+        Enviar Mensaje
+      </button>
+    </div>
+
+  </div>
+
+</div>
+
+<script src="/static/js/chat.js"></script>
+
 </body>
 </html>
