@@ -4,7 +4,7 @@
 set -e
 
 DB_NAME="AdventureWorks2016_EXT"
-BAK_PATH="/var/opt/mssql/backup/AdventureWorks2016_EXT.bak"
+BAK_PATH="/var/opt/mssql/backup/AdventureWorksDW2016_EXT.bak"
 SQLCMD="/opt/mssql-tools18/bin/sqlcmd"
 MAX_WAIT=90
 WAITED=0
@@ -42,9 +42,8 @@ else
 RESTORE DATABASE [${DB_NAME}]
 FROM DISK = '${BAK_PATH}'
 WITH
-    MOVE '${DB_NAME}_Data' TO '/var/opt/mssql/data/${DB_NAME}.mdf',
-    MOVE '${DB_NAME}_Log'  TO '/var/opt/mssql/data/${DB_NAME}_log.ldf',
-    MOVE '${DB_NAME}_mod'  TO '/var/opt/mssql/data/${DB_NAME}_mod',
+    MOVE 'AdventureWorksDW2016_EXT_Data' TO '/var/opt/mssql/data/${DB_NAME}.mdf',
+    MOVE 'AdventureWorksDW2016_EXT_Log'  TO '/var/opt/mssql/data/${DB_NAME}_log.ldf',
     REPLACE, RECOVERY, STATS = 10
 "
         echo "✅ Restore completado."

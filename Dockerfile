@@ -32,10 +32,16 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt .
+
+# Instalar torch CPU antes que sentence-transformers para evitar descargar CUDA/nvidia (800MB+)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN chmod +x /app/start.sh /app/entrypoint.sh
+
 EXPOSE 8000
 
-CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/bin/bash", "/app/start.sh"]
