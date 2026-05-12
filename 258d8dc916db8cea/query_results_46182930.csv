@@ -1,6 +1,0 @@
-producto_id,nombre,categoria,precio,activo
-1,Laptop Lenovo,Tecnología,850.0,True
-2,Mouse Logitech,Accesorios,25.0,True
-3,Monitor Samsung,Tecnología,220.0,True
-4,Teclado Mecánico,Accesorios,90.0,True
-5,Impresora HP,Tecnología,180.0,True

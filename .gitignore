@@ -1,0 +1,18 @@
+# environment
+.env
+
+# python
+__pycache__/
+*.pyc
+
+# chromadb
+*.sqlite3
+*.bin
+
+# vscode
+.vscode/
+
+# python env
+.venv/
+
+backend/vanna_chromadb/
