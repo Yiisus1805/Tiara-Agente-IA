@@ -4,6 +4,7 @@ import logging
 import os
 import uuid
 import re
+from decimal import Decimal
 from typing import Any, Optional, AsyncGenerator
 
 import httpx
@@ -58,6 +59,22 @@ class NullFileSystem(FileSystem):
 
 # TrackingSqlTool
 
+# Palabras reservadas de SQL Server que el LLM usa frecuentemente como alias
+_RESERVED_ALIAS_REPLACEMENTS = {
+    r'\bCurrent\b':  'CurRow',
+    r'\bPrevious\b': 'PrevRow',
+    r'\bNext\b':     'NextRow',
+    r'\bPrev\b':     'PrevRow',
+}
+
+
+def _sanitize_sql_aliases(sql: str) -> str:
+    sanitized = sql
+    for pattern, replacement in _RESERVED_ALIAS_REPLACEMENTS.items():
+        sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
+    return sanitized
+
+
 class TrackingSqlTool(RunSqlTool):
     def __init__(self, sql_runner, on_sql_executed=None):
         super().__init__(sql_runner=sql_runner, file_system=NullFileSystem())
@@ -68,6 +85,12 @@ class TrackingSqlTool(RunSqlTool):
 
     async def execute(self, context, args):
         sql = getattr(args, "sql", None)
+        if sql:
+            sanitized = _sanitize_sql_aliases(sql)
+            if sanitized != sql:
+                logger.info("SQL sanitizado — alias reservados reemplazados")
+                args = RunSqlToolArgs(sql=sanitized)
+                sql = sanitized
         logger.info("TrackingSqlTool.execute() — SQL: %s", sql)
         result = await super().execute(context, args)
         if sql:
@@ -154,18 +177,23 @@ async def _generate_analysis(question: str, data_rows: list, columns: list) -> s
     if not api_key:
         return ""
 
-    # Construir resumen de datos para el LLM
+    # Construir resumen de datos para el LLM con números formateados
     rows_preview = data_rows[:10]
     data_str = ", ".join(columns) + "\n"
     for r in rows_preview:
-        data_str += ", ".join(str(r.get(c, "")) for c in columns) + "\n"
+        data_str += ", ".join(_format_cell(r.get(c), c) for c in columns) + "\n"
 
     prompt = (
         f"Pregunta del usuario: {question}\n\n"
         f"Datos obtenidos:\n{data_str}\n\n"
-        "Escribe UN párrafo breve (2-3 oraciones) en español analizando estos datos. "
-        "Menciona los valores específicos. No uses markdown, bullets ni encabezados. "
-        "Solo texto narrativo directo."
+        "Escribe UN párrafo en español (2-3 oraciones) respondiendo la pregunta con los datos de arriba.\n"
+        "REGLAS ESTRICTAS:\n"
+        "- Nombra EXACTAMENTE los valores que aparecen en los datos (nombres de territorios, productos, "
+        "clientes, años, porcentajes, montos, etc.).\n"
+        "- NUNCA uses frases vagas como 'el especificado en la consulta', 'los datos muestran', "
+        "'según los resultados', 'el territorio analizado'. Si tienes el nombre, úsalo.\n"
+        "- Si hay un número ganador (mejor, mayor, top), menciónalo primero.\n"
+        "- Sin markdown, bullets ni encabezados. Solo texto narrativo directo."
     )
 
     try:
@@ -311,6 +339,38 @@ def _safe_str(v: Any) -> str:
         return ""
 
 
+_SKIP_FORMAT_KEYWORDS = {
+    "year", "month", "day", "quarter", "key", "id",
+    "number", "code", "type", "flag", "index", "rank",
+    "level", "version", "semester",
+}
+
+
+def _format_cell(v: Any, col: str = "") -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return str(v)
+    skip = any(kw in col.lower() for kw in _SKIP_FORMAT_KEYWORDS)
+    if isinstance(v, float):
+        return f"{v:.2f}" if skip else f"{v:,.2f}"
+    if isinstance(v, Decimal):
+        fv = float(v)
+        return f"{fv:.2f}" if skip else f"{fv:,.2f}"
+    if isinstance(v, int):
+        return str(v) if skip else f"{v:,}"
+    return str(v)
+
+
+_VAGUE_PLACEHOLDERS = [" de x", " a y", " del z%", " de x,", "fueron de x", "aumentaron a y",
+                       "ventas de x", "total de x", " x millones", " y millones"]
+
+
+def _is_vague_analysis(text: str) -> bool:
+    lower = text.lower()
+    return any(p in lower for p in _VAGUE_PLACEHOLDERS)
+
+
 def _should_hide_text(text: str) -> bool:
     lower = text.lower()
     indicators = [
@@ -366,7 +426,7 @@ def extract_text_from_component(component: Any) -> str:
                     html.append('<tr>')
                     for c in cols:
                         v = r.get(c, "") if isinstance(r, dict) else ""
-                        html.append(f'<td>{_safe_str(v).strip()}</td>')
+                        html.append(f'<td>{_format_cell(v, c)}</td>')
                     html.append('</tr>')
                 html.append('</tbody></table>')
                 return "\n".join(html)
@@ -441,22 +501,55 @@ def _build_schema_prompt(message: str, hits: list) -> str:
     return (
         "Eres un experto en SQL Server y análisis de negocio. Reglas:\n"
         "1. Usa SOLO tablas y columnas del esquema dado.\n"
-        "2. Llama a run_sql UNA SOLA VEZ. Si la query falla NO reintentes — reporta el error.\n"
+        "2. Llama a run_sql EXACTAMENTE UNA VEZ. ABSOLUTAMENTE PROHIBIDO ejecutar run_sql más de una vez.\n"
+        "   Si necesitas múltiples datos, combínalos en UNA sola query con CTEs o subconsultas.\n"
+        "   Si la query falla NO reintentes — reporta el error exacto al usuario.\n"
         "   Para filtrar por año en DimDate usa SIEMPRE: WHERE D.CalendarYear IN (...)\n"
         "3. Para limitar filas usa TOP N al inicio: SELECT TOP N ... (nunca al final).\n"
         "4. No menciones CSV, archivos, ni muestres el SQL generado.\n"
         "5. No uses **, ##, ni markdown en tus respuestas.\n"
         "6. NUNCA digas que el esquema no tiene información si hay tablas Fact con métricas.\n\n"
+        "ALIAS DE TABLAS (CRÍTICO — error frecuente):\n"
+        "NUNCA uses palabras reservadas de SQL Server como alias de tabla o CTE. Lista negra PROHIBIDA:\n"
+        "  IS, AS, IN, ON, BY, OR, AND, NOT, TO, AT, GO, IF, DO,\n"
+        "  CURRENT, PREVIOUS, NEXT, KEY, SET, VALUE, USER, TABLE, VIEW,\n"
+        "  INDEX, ORDER, GROUP, SELECT, WHERE, FROM, JOIN, CASE, WHEN\n"
+        "En CTEs usa nombres descriptivos: YearlySales, SalesGrowth, CurYear, PrevYear, BaseData.\n"
+        "Usa SIEMPRE estos alias seguros para las tablas principales:\n"
+        "  FactInternetSales    → FIS\n"
+        "  FactResellerSales    → FRS\n"
+        "  DimProduct           → DP\n"
+        "  DimProductCategory   → DPC\n"
+        "  DimProductSubcategory→ DPSC\n"
+        "  DimCustomer          → DC\n"
+        "  DimDate              → DD\n"
+        "  DimSalesTerritory    → DST\n"
+        "  DimEmployee          → DE\n"
+        "  DimReseller          → DR\n"
+        "  DimGeography         → DG\n"
+        "  DimPromotion         → DPROM\n"
+        "Ejemplo CTE correcto:\n"
+        "  WITH YearlySales AS (...) ,\n"
+        "  SalesGrowth AS (SELECT CurYear.Col FROM YearlySales CurYear JOIN YearlySales PrevYear ...)\n\n"
+        "AÑOS Y FECHAS (CRÍTICO):\n"
+        "NUNCA uses GETDATE(), YEAR(GETDATE()), ni el año actual del sistema como referencia.\n"
+        "Los datos disponibles en la base de datos tienen un rango histórico fijo.\n"
+        "- Si la pregunta NO especifica un año → usa los años reales del dataset con:\n"
+        "    SELECT MIN(CalendarYear), MAX(CalendarYear) FROM dbo.DimDate\n"
+        "  o filtra con: WHERE DD.CalendarYear IN (SELECT DISTINCT CalendarYear FROM dbo.DimDate)\n"
+        "- Para comparaciones 'año a año' → usa los años presentes en DimDate, "
+        "    haciendo JOIN de la tabla consigo misma por CalendarYear y CalendarYear+1.\n"
+        "- Para 'último año disponible' → usa: (SELECT MAX(CalendarYear) FROM dbo.DimDate)\n\n"
         "ANÁLISIS DE NEGOCIO (importante):\n"
         "- Si la pregunta es analítica o estratégica, infiere la métrica más relevante "
         "(SalesAmount, OrderQuantity) y responde con datos reales.\n"
-        "- Para preguntas de regiones → usa DimSalesTerritory + FactInternetSales.\n"
-        "- Para preguntas de productos → usa DimProduct + FactInternetSales.\n"
-        "- Para preguntas de clientes → usa DimCustomer + FactInternetSales.\n"
-        "- Para tendencias temporales → usa DimDate + FactInternetSales, filtra por CalendarYear.\n\n"
+        "- Para preguntas de regiones → usa DimSalesTerritory DST + FactInternetSales FIS.\n"
+        "- Para preguntas de productos → usa DimProduct DP + FactInternetSales FIS.\n"
+        "- Para preguntas de clientes → usa DimCustomer DC + FactInternetSales FIS.\n"
+        "- Para tendencias temporales → usa DimDate DD + FactInternetSales FIS, filtra por DD.CalendarYear.\n\n"
         "USO DE RELACIONES:\n"
         "- Úsalas para hacer JOIN entre tablas correctamente.\n"
-        "- Para ventas sin canal específico usa SOLO FactInternetSales.\n"
+        "- Para ventas sin canal específico usa SOLO FactInternetSales FIS.\n"
         "- Nunca uses FactResellerSalesXL_PageCompressed ni FactResellerSalesXL_CCI.\n\n"
         "FORMATO (obligatorio):\n"
         "- Pregunta analítica simple (total, promedio, conteo, mejor/peor) → SOLO texto narrativo, sin tabla.\n"
@@ -465,10 +558,15 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "- Respeta exactamente el N de filas pedido (TOP N en el SQL).\n"
         "- NUNCA uses formato | col | col | (markdown pipe).\n\n"
         "ESQUEMA:\n"
-        "RECUERDA: Tu respuesta DEBE terminar con un párrafo de texto analizando los resultados.\n\n"
         f"{schema_lines}\n\n"
-        f"PREGUNTA: {message}"
+        f"PREGUNTA: {message}\n\n"
+        "INSTRUCCIÓN FINAL (obligatoria): Después de mostrar los datos, escribe SIEMPRE un párrafo "
+        "en español (2-4 oraciones) analizando los resultados. Menciona valores específicos, "
+        "tendencias o el dato más destacado. Este párrafo va DESPUÉS de la tabla, nunca antes."
     )
+
+
+_PINNED_TABLES = {"dbo.FactInternetSales"}
 
 
 def _inject_schema_rag(message: str) -> str:
@@ -482,6 +580,19 @@ def _inject_schema_rag(message: str) -> str:
         else:
             raw_hits = SCHEMA_STORE.query(message, k=RAG_K_FETCH)
             hits = _filter_and_deduplicate(raw_hits)
+
+            # Siempre incluir tablas Fact principales aunque el RAG no las recupere
+            hit_tables = {
+                f"{h.get('meta', {}).get('schema', 'dbo')}.{h.get('meta', {}).get('table', '')}"
+                for h in hits
+            }
+            for pinned in _PINNED_TABLES:
+                if pinned not in hit_tables:
+                    pinned_table = pinned.split(".")[-1]
+                    pinned_hits = SCHEMA_STORE.query(pinned_table, k=1)
+                    if pinned_hits:
+                        hits.append(pinned_hits[0])
+                        logger.info("RAG: tabla pineada añadida → %s", pinned)
 
         if not hits:
             return message
@@ -603,16 +714,84 @@ async def run_agent_stream_text(
         return
 
     # 5. Emitir respuesta
+    logger.info(
+        "Buffers — pre_table:%d tabla:%d post_table:%d",
+        len(pre_table_buffer), len(tabla_chunks), len(post_table_chunks),
+    )
+    if post_table_chunks:
+        logger.info("post_table_chunks[0][:120]: %s", post_table_chunks[0][:120])
+    elif table_seen:
+        logger.warning("Tabla encontrada pero post_table_chunks está vacío — el LLM no generó análisis posterior")
+
     response_chunks: list[str] = []
 
     if table_seen and tabla_chunks:
         merged_table = _merge_multiple_tables(tabla_chunks) if len(tabla_chunks) > 1 else tabla_chunks[0]
         response_chunks.append(merged_table)
         yield merged_table
-        for chunk in post_table_chunks:
-            response_chunks.append(chunk)
-            yield chunk
+
+        combined_post = " ".join(post_table_chunks)
+        if post_table_chunks and not _is_vague_analysis(combined_post):
+            for chunk in post_table_chunks:
+                response_chunks.append(chunk)
+                yield chunk
+        elif captured_sql and SQL_RUNNER:
+            if post_table_chunks:
+                logger.warning("Análisis del LLM detectado como vago — reemplazando con fallback")
+            # Usar la primera query capturada (la principal, no las auxiliares)
+            best_sql = captured_sql[0]
+            try:
+                tool_args = RunSqlToolArgs(sql=best_sql)
+                df = await SQL_RUNNER.run_sql(tool_args, None)
+                if not df.empty:
+                    cols = df.columns.tolist()
+                    rows = df.to_dict("records")
+                    analysis = await _generate_analysis(original_question, rows, cols)
+                    if analysis:
+                        response_chunks.append(analysis)
+                        yield analysis
+                        logger.info("Análisis de respaldo generado correctamente")
+            except Exception:
+                logger.exception("Error generando análisis de respaldo")
+    elif captured_sql and SQL_RUNNER:
+        # El stream produjo output vacío pero el SQL fue ejecutado — fallback completo
+        logger.warning("Stream vacío con SQL capturado — activando fallback de renderizado")
+        try:
+            tool_args = RunSqlToolArgs(sql=captured_sql[0])
+            df = await SQL_RUNNER.run_sql(tool_args, None)
+            if not df.empty:
+                cols = df.columns.tolist()
+                rows = df.to_dict("records")
+
+                if len(cols) > 1 and len(rows) > 1:
+                    html = ['<table class="data-table"><thead><tr>']
+                    for col in cols:
+                        html.append(f'<th>{_safe_str(col)}</th>')
+                    html.append('</tr></thead><tbody>')
+                    for r in rows[:MAX_ROWS_LIMIT]:
+                        html.append('<tr>')
+                        for c in cols:
+                            html.append(f'<td>{_format_cell(r.get(c, ""), c)}</td>')
+                        html.append('</tr>')
+                    html.append('</tbody></table>')
+                    table_html = "\n".join(html)
+                    response_chunks.append(table_html)
+                    yield table_html
+
+                analysis = await _generate_analysis(original_question, rows, cols)
+                if analysis:
+                    response_chunks.append(analysis)
+                    yield analysis
+                    logger.info("Fallback completo emitido correctamente")
+            else:
+                msg = "La consulta no devolvió resultados."
+                response_chunks.append(msg)
+                yield msg
+        except Exception:
+            logger.exception("Error en fallback de renderizado")
+            yield "Ocurrió un error al procesar los resultados."
     else:
+        # Sin SQL capturado — emitir texto conversacional del LLM (si lo hay)
         for chunk in pre_table_buffer:
             response_chunks.append(chunk)
             yield chunk
@@ -621,7 +800,7 @@ async def run_agent_stream_text(
     if captured_sql:
         _store_sql_cache(
             original_question,
-            captured_sql[-1],
+            captured_sql[0],
             full_response="\n".join(response_chunks),
         )
         logger.info("SQL guardado en cache para: '%s'", original_question)
