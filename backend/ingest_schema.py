@@ -20,40 +20,222 @@ store = SchemaVectorStore(
 
 
 # Diccionario semantico
+# Cada entrada combina: sinónimos en español, nombres de columnas clave y
+# patrones de preguntas naturales para mejorar la recuperación semántica.
 
 SPANISH_ALIASES = {
-    "FactInternetSales":                        "ventas internet ventas online pedidos clientes SalesAmount OrderQuantity ingresos monto total",
-    "FactResellerSales":                        "ventas reseller revendedor distribuidor SalesAmount OrderQuantity ingresos monto total",
-    "DimProduct":                               "productos articulos items ProductName nombre producto",
-    "DimProductCategory":                       "categorias de productos categoria EnglishProductCategoryName",
-    "DimProductSubcategory":                    "subcategorias de productos subcategoria EnglishProductSubcategoryName",
-    "DimCustomer":                              "clientes compradores CustomerName nombre cliente",
-    "DimDate":                                  "fechas calendario año mes dia year month CalendarYear FullDateAlternateKey fecha",
-    "DimSalesTerritory":                        "territorios regiones paises zona geografica SalesTerritoryRegion SalesTerritoryCountry",
-    "DimEmployee":                              "empleados vendedores personal EmployeeName nombre empleado",
-    "DimReseller":                              "reseller revendedor distribuidor ResellerName nombre reseller",
-    "DimGeography":                             "geografia pais ciudad estado Country City StateProvinceName",
-    "DimPromotion":                             "promociones descuentos PromotionName DiscountPct oferta",
-    "DimCurrency":                              "moneda divisa CurrencyName CurrencyAlternateKey",
-    "DimAccount":                               "cuentas contables AccountDescription AccountType",
-    "DimDepartmentGroup":                       "departamentos grupos DepartmentGroupName",
-    "DimOrganization":                          "organizacion empresa OrganizationName CurrencyKey",
-    "DimScenario":                              "escenarios presupuesto ScenarioName",
-    "FactSalesQuota":                           "cuota presupuesto objetivo meta ventas SalesAmountQuota",
-    "FactProductInventory":                     "inventario stock productos UnitsBalance MovementDate",
-    "FactFinance":                              "finanzas contabilidad Amount AccountKey",
-    "FactCallCenter":                           "call center llamadas WagesAmount LaborHours",
-    "FactCurrencyRate":                         "tipo de cambio moneda tasa AverageRate EndOfDayRate",
-    "FactInternetSalesReason":                  "razones motivos ventas internet SalesReasonKey",
-    "FactSurveyResponse":                       "encuestas respuestas SurveyResponseKey",
-    "FactAdditionalInternationalProductDescription": "descripcion internacional producto ProductDescription",
-    "FactResellerSalesXL_CCI":                  "ventas reseller copia XL CCI (no usar en produccion)",
-    "FactResellerSalesXL_PageCompressed":       "ventas reseller copia XL comprimida (no usar en produccion)",
-    "NewFactCurrencyRate":                      "tipo de cambio nuevo moneda AverageRate",
-    "ProspectiveBuyer":                         "compradores potenciales prospectos clientes futuros",
-    "DatabaseLog":                              "log base de datos auditoria cambios",
-    "AdventureWorksDWBuildVersion":             "version build base de datos",
-    "sysdiagrams":                              "diagramas sistema base de datos",
+
+    # ── TABLAS FACT (métricas / transacciones) ──────────────────────────────
+
+    "FactInternetSales": (
+        "ventas internet ventas online pedidos compras canal directo "
+        "SalesAmount OrderQuantity TotalProductCost TaxAmt Freight UnitPrice "
+        "ingresos monto total facturación revenue cuanto se vendio "
+        "unidades vendidas importe total productos vendidos "
+        "cuantos pedidos top ventas ranking ventas mejor cliente "
+        "cuanto ingreso generaron las ventas online"
+    ),
+    "FactResellerSales": (
+        "ventas reseller revendedor distribuidor canal indirecto canal distribucion "
+        "SalesAmount OrderQuantity TotalProductCost UnitPrice "
+        "ingresos monto total facturación ventas por distribuidor "
+        "cuanto vendio el reseller ranking distribuidores "
+        "ventas a traves de socios comerciales"
+    ),
+    "FactSalesQuota": (
+        "cuota presupuesto objetivo meta target SalesAmountQuota CalendarYear "
+        "objetivo de ventas meta de ventas quota cumplimiento de meta "
+        "cuanto se esperaba vender proyeccion de ventas "
+        "vs objetivo vendedor alcanzó su meta"
+    ),
+    "FactProductInventory": (
+        "inventario stock existencias almacen bodega "
+        "UnitsBalance MovementDate UnitCost OnHandQuantity "
+        "inventario disponible stock disponible productos en bodega "
+        "cuantas unidades hay disponibles de un producto "
+        "nivel de inventario rotacion de inventario"
+    ),
+    "FactFinance": (
+        "finanzas contabilidad cifras financieras Amount AccountKey "
+        "FinanceKey OrganizationKey DepartmentGroupKey ScenarioKey "
+        "balance estado de resultados presupuesto financiero "
+        "datos financieros por departamento por escenario"
+    ),
+    "FactCallCenter": (
+        "call center servicio al cliente llamadas operadores "
+        "WagesAmount LaborHours Calls OrdersPerOperator ServiceGrade "
+        "automaticResponses nivel de servicio horas laborales "
+        "eficiencia del call center atencion al cliente"
+    ),
+    "FactCurrencyRate": (
+        "tipo de cambio moneda tasa conversion divisa "
+        "AverageRate EndOfDayRate CurrencyKey DateKey "
+        "cambio de divisas conversion de moneda dolar euro peso "
+        "cuanto valia la moneda en una fecha"
+    ),
+    "FactInternetSalesReason": (
+        "razones motivos causa ventas internet SalesReasonKey "
+        "por que compraron motivo de compra razon de venta online "
+        "factores que influyeron en la venta"
+    ),
+    "FactSurveyResponse": (
+        "encuestas respuestas satisfaccion cliente "
+        "SurveyResponseKey DateKey CustomerKey "
+        "retroalimentacion feedback opinion del cliente "
+        "que piensa el cliente nivel de satisfaccion"
+    ),
+    "FactAdditionalInternationalProductDescription": (
+        "descripcion internacional producto idioma CultureID "
+        "ProductDescription descripcion del producto en otros idiomas "
+        "traduccion nombre producto internacional"
+    ),
+    "FactResellerSalesXL_CCI": (
+        "ventas reseller copia XL CCI tabla auxiliar no usar en produccion"
+    ),
+    "FactResellerSalesXL_PageCompressed": (
+        "ventas reseller copia XL comprimida tabla auxiliar no usar en produccion"
+    ),
+    "NewFactCurrencyRate": (
+        "tipo de cambio actualizado nueva tabla moneda AverageRate EndOfDayRate"
+    ),
+
+    # ── TABLAS DIMENSION (atributos / descriptores) ─────────────────────────
+
+    "DimProduct": (
+        "productos articulos items catalogo de productos SKU codigo "
+        "ProductName EnglishProductName SpanishProductName FrenchProductName "
+        "StandardCost ListPrice Color Size Weight Class Style FinishedGoodsFlag "
+        "nombre producto precio costo lista de precios color talla peso "
+        "que productos existen cuales son los productos disponibles "
+        "informacion del articulo detalle del producto"
+    ),
+    "DimProductCategory": (
+        "categorias principales de productos clasificacion primer nivel "
+        "EnglishProductCategoryName SpanishProductCategoryName FrenchProductCategoryName "
+        "a que categoria pertenece el producto agrupacion de productos "
+        "categoria bicicletas ropa accesorios componentes"
+    ),
+    "DimProductSubcategory": (
+        "subcategorias de productos segundo nivel clasificacion "
+        "EnglishProductSubcategoryName SpanishProductSubcategoryName FrenchProductSubcategoryName "
+        "ProductCategoryKey subdivision de categoria "
+        "a que subcategoria pertenece el producto tipo de articulo"
+    ),
+    "DimCustomer": (
+        "clientes compradores consumidores base de clientes "
+        "CustomerKey FirstName LastName EmailAddress Phone BirthDate Gender "
+        "MaritalStatus YearlyIncome TotalChildren EnglishEducation "
+        "nombre cliente apellido correo telefono edad sexo ingresos "
+        "informacion del cliente datos demograficos "
+        "quien compro cuales son los clientes mejores clientes top clientes "
+        "perfil del comprador cliente mas valioso"
+    ),
+    "DimDate": (
+        "fechas calendario tiempo periodo dimension de tiempo "
+        "CalendarYear CalendarQuarter CalendarSemester MonthNumberOfYear "
+        "FiscalYear FiscalQuarter FiscalSemester "
+        "FullDateAlternateKey DayNumberOfMonth DayNumberOfWeek "
+        "EnglishDayNameOfWeek EnglishMonthName SpanishMonthName "
+        "año mes dia semana trimestre semestre "
+        "cuando durante en el año en el mes en el trimestre "
+        "fecha de la venta periodo rango de fechas año fiscal "
+        "comparar periodos mes anterior año anterior"
+    ),
+    "DimSalesTerritory": (
+        "territorios de ventas regiones paises zona geografica de ventas "
+        "SalesTerritoryRegion SalesTerritoryCountry SalesTerritoryGroup "
+        "SalesTerritoryImage SalesTerritoryAlternateKey "
+        "donde se vendio en que region en que pais "
+        "America Europe Pacific North South Central "
+        "ventas por region ventas por pais desempeno territorial"
+    ),
+    "DimEmployee": (
+        "empleados vendedores personal fuerza de ventas colaboradores "
+        "EmployeeKey FirstName LastName Title EmailAddress Phone "
+        "HireDate BirthDate Gender MaritalStatus SalesPersonFlag "
+        "nombre empleado apellido cargo titulo puesto fecha contratacion "
+        "vendedor representante de ventas quien vendio "
+        "mejor vendedor ranking de vendedores desempeno del empleado"
+    ),
+    "DimReseller": (
+        "reseller revendedor distribuidor socio de canal partner "
+        "ResellerKey ResellerName Phone BusinessType ResellerAlternateKey "
+        "NumberEmployees YearOpened AnnualRevenue AnnualSales "
+        "nombre reseller tipo de negocio distribuidor autorizado "
+        "quienes son los distribuidores mejores distribuidores "
+        "tamaño del distribuidor revenue del distribuidor"
+    ),
+    "DimGeography": (
+        "geografia ubicacion pais ciudad estado provincia codigo postal "
+        "GeographyKey City StateProvinceName CountryRegionCode "
+        "EnglishCountryRegionName SpanishCountryRegionName "
+        "PostalCode SalesTerritoryKey IpAddressLocator "
+        "donde vive el cliente direccion lugar latitud longitud "
+        "en que ciudad en que pais en que estado clientes por region"
+    ),
+    "DimPromotion": (
+        "promociones descuentos ofertas campañas marketing "
+        "PromotionKey PromotionName PromotionAlternateKey "
+        "DiscountPct PromotionType PromotionCategory "
+        "EnglishPromotionName SpanishPromotionName "
+        "StartDate EndDate MinQty MaxQty "
+        "descuento aplicado tipo de promocion porcentaje descuento "
+        "ventas con descuento cuanto descuento se aplico "
+        "efecto de la promocion en ventas"
+    ),
+    "DimCurrency": (
+        "moneda divisa tipo de moneda "
+        "CurrencyKey CurrencyAlternateKey CurrencyName "
+        "dolar USD euro EUR peso nombre de la moneda "
+        "en que moneda se realizaron las ventas conversion"
+    ),
+    "DimAccount": (
+        "cuentas contables plan de cuentas contabilidad "
+        "AccountKey AccountAlternateKey AccountDescription AccountType "
+        "Operator CustomMembers ValueType "
+        "tipo de cuenta descripcion contable activo pasivo ingreso gasto"
+    ),
+    "DimDepartmentGroup": (
+        "departamentos grupos organizacionales estructura "
+        "DepartmentGroupKey DepartmentGroupName ParentDepartmentGroupKey "
+        "area departamento grupo jerarquia departamental "
+        "a que departamento pertenece organigrama"
+    ),
+    "DimOrganization": (
+        "organizacion empresa estructura corporativa "
+        "OrganizationKey OrganizationName PercentageOwnership CurrencyKey "
+        "nombre empresa subsidiaria porcentaje de propiedad "
+        "estructura organizacional grupo empresarial"
+    ),
+    "DimScenario": (
+        "escenarios presupuesto proyeccion planeacion financiera "
+        "ScenarioKey ScenarioName "
+        "escenario real actual vs presupuesto vs proyeccion "
+        "comparacion de escenarios financieros"
+    ),
+    "ProspectiveBuyer": (
+        "compradores potenciales prospectos clientes futuros leads "
+        "ProspectiveBuyerKey FirstName LastName EmailAddress BirthDate "
+        "Gender MaritalStatus YearlyIncome TotalChildren "
+        "posibles clientes base de prospectos candidatos a comprar "
+        "perfil del prospecto campañas de adquisicion"
+    ),
+    "DatabaseLog": (
+        "log auditoria historial de cambios base de datos "
+        "DatabaseLogID PostTime DatabaseUser Event Schema Object TSQL XmlEvent "
+        "quien hizo que cambio cuando registro de actividad "
+        "trazabilidad auditoria de base de datos"
+    ),
+    "AdventureWorksDWBuildVersion": (
+        "version build metadata sistema "
+        "DBVersion VersionDate "
+        "version de la base de datos informacion del sistema build actual"
+    ),
+    "sysdiagrams": (
+        "diagramas sistema esquema visual metadata "
+        "name principal diagram definition "
+        "diagrama entidad relacion ER estructura visual"
+    ),
 }
 
 
@@ -179,13 +361,39 @@ def detect_table_type(table_name: str):
 
 # BUILD DOCUMENT
 
+_NUMERIC_TYPES = {
+    "int", "bigint", "smallint", "tinyint",
+    "decimal", "numeric", "float", "real",
+    "money", "smallmoney",
+}
+
+_DATE_TYPES = {"date", "datetime", "datetime2", "smalldatetime", "datetimeoffset"}
+
+_TEXT_TYPES = {"varchar", "nvarchar", "char", "nchar", "text", "ntext"}
+
+
+def _classify_columns(columns):
+    metrics, dimensions, temporals, keys = [], [], [], []
+    for name, typ, *_ in columns:
+        t = typ.lower()
+        n = name.lower()
+        if "key" in n or n.endswith("id"):
+            keys.append(name)
+        elif t in _NUMERIC_TYPES:
+            metrics.append(name)
+        elif t in _DATE_TYPES:
+            temporals.append(name)
+        elif t in _TEXT_TYPES:
+            dimensions.append(name)
+    return metrics, dimensions, temporals
+
+
 def build_schema_doc(schema, table, columns, pks, relations):
 
     table_type = detect_table_type(table)
     aliases = SPANISH_ALIASES.get(table, "")
 
     column_lines = []
-
     for name, typ, length, nullable in columns:
         null_txt = "NULL" if nullable else "NOT NULL"
         column_lines.append(f"{name} ({typ}) {null_txt}")
@@ -198,6 +406,26 @@ def build_schema_doc(schema, table, columns, pks, relations):
         rel_lines.append(f"{schema}.{table}.{r[0]} -> {r[1]}.{r[2]}.{r[3]}")
     rels = "\n".join(rel_lines) if rel_lines else "None"
 
+    metrics, dimensions, temporals = _classify_columns(columns)
+
+    metric_hint = ""
+    if table_type == "Fact" and metrics:
+        metric_hint = (
+            f"\nMétricas agregables (SUM / AVG / COUNT / STDEV):\n"
+            f"{', '.join(metrics)}\n"
+            f"\nAtributos para GROUP BY / filtros:\n"
+            f"{', '.join(dimensions) if dimensions else 'ver columnas *Key para JOIN'}\n"
+            f"\nColumnas temporales (filtrar / agrupar por fecha):\n"
+            f"{', '.join(temporals) if temporals else 'usar DateKey → JOIN con DimDate'}\n"
+        )
+    elif table_type == "Dimension" and (dimensions or temporals):
+        metric_hint = (
+            f"\nAtributos textuales (GROUP BY / filtros / etiquetas):\n"
+            f"{', '.join(dimensions)}\n"
+        )
+        if temporals:
+            metric_hint += f"\nColumnas de fecha:\n{', '.join(temporals)}\n"
+
     doc = f"""
 Tabla: {schema}.{table}
 
@@ -207,7 +435,7 @@ Conceptos relacionados: {aliases}
 
 Columnas:
 {cols}
-
+{metric_hint}
 Primary Key:
 {pk_text}
 
@@ -215,8 +443,12 @@ Relaciones (esta tabla referencia a):
 {rels}
 
 Uso:
-- Tablas Fact contienen métricas (ventas, cantidades, montos).
-- Tablas Dim contienen atributos descriptivos.
+- Tablas Fact contienen métricas (ventas, cantidades, montos): usar SUM, AVG, COUNT, STDEV, RANK.
+- Tablas Dim contienen atributos descriptivos: usar para GROUP BY, etiquetas y filtros.
+- Para estadísticas por grupo: JOIN Fact + Dim → GROUP BY columna Dim → AGG(métrica Fact).
+- Para tendencias temporales: JOIN con DimDate → GROUP BY CalendarYear / CalendarQuarter.
+- Para rankings: ORDER BY AGG DESC con TOP N, o usar RANK() OVER (ORDER BY AGG DESC).
+- Para crecimiento YoY: subconsulta o LAG() OVER (ORDER BY CalendarYear).
 """.strip()
 
     return doc
