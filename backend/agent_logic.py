@@ -345,6 +345,17 @@ _SKIP_FORMAT_KEYWORDS = {
     "level", "version", "semester",
 }
 
+_PERCENT_KEYWORDS = {
+    "pct", "percent", "porcentaje", "porc", "growth", "crecimiento",
+    "ratio", "tasa", "share", "participacion", "participación",
+    "margen", "margin", "rate", "variacion", "variación",
+}
+
+
+def _is_percent_col(col: str) -> bool:
+    c = col.lower()
+    return any(kw in c for kw in _PERCENT_KEYWORDS)
+
 
 def _format_cell(v: Any, col: str = "") -> str:
     if v is None:
@@ -352,12 +363,15 @@ def _format_cell(v: Any, col: str = "") -> str:
     if isinstance(v, bool):
         return str(v)
     skip = any(kw in col.lower() for kw in _SKIP_FORMAT_KEYWORDS)
-    if isinstance(v, float):
-        return f"{v:.2f}" if skip else f"{v:,.2f}"
-    if isinstance(v, Decimal):
+    is_pct = _is_percent_col(col)
+    if isinstance(v, (float, Decimal)):
         fv = float(v)
+        if is_pct:
+            return f"{fv:,.2f}%"
         return f"{fv:.2f}" if skip else f"{fv:,.2f}"
     if isinstance(v, int):
+        if is_pct:
+            return f"{v:,}%"
         return str(v) if skip else f"{v:,}"
     return str(v)
 
@@ -650,7 +664,7 @@ async def run_agent_stream_text(
                     for r in rows[:MAX_ROWS_LIMIT]:
                         html.append('<tr>')
                         for c in cols:
-                            html.append(f'<td>{_safe_str(r.get(c, "")).strip()}</td>')
+                            html.append(f'<td>{_format_cell(r.get(c, ""), c)}</td>')
                         html.append('</tr>')
                     html.append('</tbody></table>')
                     yield "\n".join(html)
@@ -738,8 +752,8 @@ async def run_agent_stream_text(
         elif captured_sql and SQL_RUNNER:
             if post_table_chunks:
                 logger.warning("Análisis del LLM detectado como vago — reemplazando con fallback")
-            # Usar la primera query capturada (la principal, no las auxiliares)
-            best_sql = captured_sql[0]
+            # Usar el último SQL capturado (el más reciente, probablemente el corregido)
+            best_sql = captured_sql[-1]
             try:
                 tool_args = RunSqlToolArgs(sql=best_sql)
                 df = await SQL_RUNNER.run_sql(tool_args, None)
@@ -756,9 +770,20 @@ async def run_agent_stream_text(
     elif captured_sql and SQL_RUNNER:
         # El stream produjo output vacío pero el SQL fue ejecutado — fallback completo
         logger.warning("Stream vacío con SQL capturado — activando fallback de renderizado")
+        # Intentar SQLs en orden inverso (el último es el más reciente y probablemente correcto)
+        df = None
+        for sql_attempt in reversed(captured_sql):
+            try:
+                tool_args = RunSqlToolArgs(sql=sql_attempt)
+                df = await SQL_RUNNER.run_sql(tool_args, None)
+                logger.info("Fallback SQL exitoso (intento con SQL más reciente)")
+                break
+            except Exception as e:
+                logger.warning("Fallback SQL falló, probando anterior: %s", e)
+        if df is None:
+            yield "Ocurrió un error al procesar los resultados."
+            return
         try:
-            tool_args = RunSqlToolArgs(sql=captured_sql[0])
-            df = await SQL_RUNNER.run_sql(tool_args, None)
             if not df.empty:
                 cols = df.columns.tolist()
                 rows = df.to_dict("records")
@@ -796,11 +821,11 @@ async def run_agent_stream_text(
             response_chunks.append(chunk)
             yield chunk
 
-    # 6. Guardar en cache
+    # 6. Guardar en cache — usar el último SQL capturado (más reciente y probablemente correcto)
     if captured_sql:
         _store_sql_cache(
             original_question,
-            captured_sql[0],
+            captured_sql[-1],
             full_response="\n".join(response_chunks),
         )
         logger.info("SQL guardado en cache para: '%s'", original_question)
