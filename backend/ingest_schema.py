@@ -29,16 +29,20 @@ SPANISH_ALIASES = {
 
     "FactInternetSales": (
         "ventas internet ventas online pedidos compras canal directo "
+        "ventas totales total de ventas ingresos totales cuanto se vendio en total "
         "SalesAmount OrderQuantity TotalProductCost TaxAmt Freight UnitPrice "
-        "ingresos monto total facturación revenue cuanto se vendio "
+        "ingresos monto total facturación revenue "
         "unidades vendidas importe total productos vendidos "
         "cuantos pedidos top ventas ranking ventas mejor cliente "
+        "tendencia de ventas ventas por año crecimiento de ventas "
         "cuanto ingreso generaron las ventas online"
     ),
     "FactResellerSales": (
         "ventas reseller revendedor distribuidor canal indirecto canal distribucion "
+        "ventas totales total de ventas ingresos totales cuanto se vendio en total "
         "SalesAmount OrderQuantity TotalProductCost UnitPrice "
         "ingresos monto total facturación ventas por distribuidor "
+        "tendencia de ventas ventas por año crecimiento de ventas "
         "cuanto vendio el reseller ranking distribuidores "
         "ventas a traves de socios comerciales"
     ),
@@ -144,10 +148,13 @@ SPANISH_ALIASES = {
     "DimSalesTerritory": (
         "territorios de ventas regiones paises zona geografica de ventas "
         "SalesTerritoryRegion SalesTerritoryCountry SalesTerritoryGroup "
-        "SalesTerritoryImage SalesTerritoryAlternateKey "
         "donde se vendio en que region en que pais "
-        "America Europe Pacific North South Central "
-        "ventas por region ventas por pais desempeno territorial"
+        "australia canada united states estados unidos germany alemania "
+        "france francia united kingdom reino unido japan japon "
+        "north america europe pacific norteamerica europa pacifico "
+        "ventas por region ventas por pais desempeno territorial "
+        "filtrar ventas por pais filtrar ventas por region "
+        "FactInternetSales y FactResellerSales se unen a esta tabla directamente via SalesTerritoryKey"
     ),
     "DimEmployee": (
         "empleados vendedores personal fuerza de ventas colaboradores "
@@ -166,12 +173,13 @@ SPANISH_ALIASES = {
         "tamaño del distribuidor revenue del distribuidor"
     ),
     "DimGeography": (
-        "geografia ubicacion pais ciudad estado provincia codigo postal "
-        "GeographyKey City StateProvinceName CountryRegionCode "
-        "EnglishCountryRegionName SpanishCountryRegionName "
-        "PostalCode SalesTerritoryKey IpAddressLocator "
-        "donde vive el cliente direccion lugar latitud longitud "
-        "en que ciudad en que pais en que estado clientes por region"
+        "geografia ubicacion ciudad estado provincia codigo postal "
+        "GeographyKey City StateProvinceName PostalCode "
+        "donde vive el cliente direccion lugar de residencia "
+        "en que ciudad en que estado en que provincia "
+        "ubicacion del cliente datos de residencia del cliente "
+        "clientes por ciudad clientes por estado clientes por codigo postal "
+        "NO usar para filtrar ventas por pais o region — usar DimSalesTerritory para eso"
     ),
     "DimPromotion": (
         "promociones descuentos ofertas campañas marketing "

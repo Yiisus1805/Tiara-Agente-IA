@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from vanna.core.user import RequestContext
 
-from .agent_logic import build_agent, run_agent_stream_text
+from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL
 
 
 agent = build_agent()
@@ -76,7 +76,13 @@ async def tiara_chat_stream(request: Request):
                     message=question,
                     conversation_id=conversation_id,
                 ):
-                    yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+                    if chunk.startswith(CHART_SENTINEL):
+                        chart_data = json.loads(chunk[len(CHART_SENTINEL):])
+                        yield f"data: {json.dumps({'type': 'chart', 'data': chart_data})}\n\n"
+                    elif '<table' in chunk:
+                        yield f"data: {json.dumps({'type': 'table', 'content': chunk})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
 
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from urllib.parse import quote_plus
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 from vanna.capabilities.sql_runner import SqlRunner, RunSqlToolArgs
 from vanna.core.tool import ToolContext
@@ -20,7 +22,7 @@ class SqlServerRunner(SqlRunner):
 
         self.engine = create_engine(
             "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_conn_str),
-            pool_pre_ping=True,
+            poolclass=NullPool,
             future=True,
         )
 
@@ -85,7 +87,9 @@ class SqlServerRunner(SqlRunner):
         if not self._is_allowed(sql):
             raise ValueError("Solo consultas SELECT (y WITH ... SELECT) permitidas")
 
-        with self.engine.connect() as conn:
-            df = pd.read_sql(text(sql), conn)
-        return df
+        def _query() -> pd.DataFrame:
+            with self.engine.connect() as conn:
+                return pd.read_sql(text(sql), conn)
+
+        return await asyncio.to_thread(_query)
 

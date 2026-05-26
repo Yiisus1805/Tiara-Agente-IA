@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -68,10 +69,164 @@ _RESERVED_ALIAS_REPLACEMENTS = {
 }
 
 
+_SQL_KEYWORD_GUARDS = [
+    # FETCH NEXT n ROWS — paginación estándar de SQL Server
+    (r'\bFETCH\s+NEXT\b', 'FETCH __NEXT__'),
+    # CURRENT_TIMESTAMP, CURRENT_DATE, etc.
+    (r'\bCURRENT_', '__CURRENT_'),
+]
+
+
+def _remove_cte_order_by(sql: str) -> str:
+    """Elimina ORDER BY dentro de CTEs sin TOP/FETCH (inválido en SQL Server)."""
+    def _strip_if_no_top(m: re.Match) -> str:
+        before = sql[max(0, m.start() - 600): m.start()]
+
+        # No eliminar ORDER BY que esté dentro de un OVER() aún abierto
+        last_over = max(before.upper().rfind('OVER ('), before.upper().rfind('OVER('))
+        if last_over >= 0:
+            depth = sum(1 if c == '(' else -1 if c == ')' else 0
+                        for c in before[last_over:])
+            if depth > 0:
+                return m.group()  # ORDER BY pertenece a una función de ventana
+
+        last_select = before.upper().rfind('SELECT')
+        context = before[last_select:] if last_select >= 0 else before
+        if re.search(r'\bTOP\b|\bFETCH\b', context, re.IGNORECASE):
+            return m.group()   # ORDER BY válido (tiene TOP/FETCH)
+        return ''              # ORDER BY inválido dentro de CTE
+
+    return re.sub(
+        r'\s+ORDER\s+BY\s+[\w\s,\.\[\]]+(?=\s*\))',
+        _strip_if_no_top,
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+_WINDOW_REQUIRES_ORDER_BY = re.compile(
+    r'\b(LAG|LEAD|FIRST_VALUE|LAST_VALUE)\b', re.IGNORECASE
+)
+_DATE_LIKE_COL = re.compile(
+    r'\b(CalendarYear|OrderDate|ShipDate|DueDate|\w+Year|\w+Date|\w+Month|\w+Quarter)\b',
+    re.IGNORECASE,
+)
+
+
+def _fix_window_order_by(sql: str) -> str:
+    """Añade ORDER BY faltante en OVER de LAG/LEAD/FIRST_VALUE/LAST_VALUE."""
+    if not _WINDOW_REQUIRES_ORDER_BY.search(sql):
+        return sql
+
+    def _patch(m: re.Match) -> str:
+        content = m.group(1)
+        if re.search(r'\bORDER\s+BY\b', content, re.IGNORECASE):
+            return m.group(0)  # ya tiene ORDER BY
+
+        # Solo actuar si la función que precede a este OVER lo requiere
+        preceding = sql[max(0, m.start() - 300): m.start()]
+        if not _WINDOW_REQUIRES_ORDER_BY.search(preceding):
+            return m.group(0)
+
+        # Inferir columna ORDER BY — preferir CalendarYear u otra columna fecha
+        date_cols = _DATE_LIKE_COL.findall(sql)
+        order_col = date_cols[0] if date_cols else None
+        if not order_col:
+            return m.group(0)  # no se puede inferir con seguridad
+
+        fixed = content.rstrip() + f' ORDER BY {order_col}'
+        logger.info(
+            "SQL corregido — ORDER BY %s añadido a OVER de función de ventana", order_col
+        )
+        return f'OVER ({fixed})'
+
+    return re.sub(r'\bOVER\s*\(([^()]*)\)', _patch, sql, flags=re.IGNORECASE)
+
+
+def _fix_missing_dimdate_join(sql: str) -> str:
+    """Añade JOIN a DimDate en CTEs que usan DD. pero olvidaron el JOIN."""
+    dimdate_join = "JOIN dbo.DimDate DD ON FIS.OrderDateKey = DD.DateKey"
+
+    def _patch_cte(m: re.Match) -> str:
+        body = m.group(0)
+        # Solo actuar si el cuerpo usa DD. pero no tiene DimDate
+        if not re.search(r'\bDD\.', body, re.IGNORECASE):
+            return body
+        if re.search(r'\bDimDate\b', body, re.IGNORECASE):
+            return body
+        # Insertar el JOIN después del primer JOIN/FROM que referencie FIS
+        patched = re.sub(
+            r'(JOIN\s+dbo\.\w+\s+(?:FIS|DST|DP|DC|DR)\s+ON\s+FIS\.\w+\s*=\s*\w+\.\w+)',
+            r'\1\n    ' + dimdate_join,
+            body,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if patched != body:
+            logger.info("SQL corregido — JOIN dbo.DimDate añadido a CTE sin él")
+        return patched
+
+    # Aplicar sobre cada bloque CTE: AS ( ... )
+    return re.sub(
+        r'AS\s*\(SELECT[\s\S]*?\)',
+        _patch_cte,
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+
+_LANG_PREFIX_FIXES = [
+    # DimProductCategory: ProductCategoryName → EnglishProductCategoryName
+    (re.compile(r'\b(?<!\bEnglish)(?<!\bSpanish)(?<!\bFrench)(ProductCategoryName)\b', re.IGNORECASE),
+     'EnglishProductCategoryName'),
+    # DimProductSubcategory: ProductSubcategoryName → EnglishProductSubcategoryName
+    (re.compile(r'\b(?<!\bEnglish)(?<!\bSpanish)(?<!\bFrench)(ProductSubcategoryName)\b', re.IGNORECASE),
+     'EnglishProductSubcategoryName'),
+    # DimProduct: ProductName → EnglishProductName (solo cuando precede alias de tabla DPC./DPSC./DP.)
+    (re.compile(r'\b(?<!\bEnglish)(?<!\bSpanish)(?<!\bFrench)(ProductDescription)\b', re.IGNORECASE),
+     'EnglishDescription'),
+]
+
+
+def _fix_lang_prefix_columns(sql: str) -> str:
+    """Corrige columnas de DimProductCategory/Subcategory que requieren prefijo English."""
+    fixed = sql
+    for pattern, replacement in _LANG_PREFIX_FIXES:
+        new = pattern.sub(replacement, fixed)
+        if new != fixed:
+            logger.info("SQL corregido — columna renombrada a %s", replacement)
+            fixed = new
+    return fixed
+
+
 def _sanitize_sql_aliases(sql: str) -> str:
-    sanitized = sql
+    # 1. Corregir nombres de columna con prefijo de idioma faltante
+    fixed = _fix_lang_prefix_columns(sql)
+
+    # 2. Añadir ORDER BY faltante en funciones de ventana (LAG/LEAD/etc.)
+    fixed = _fix_window_order_by(fixed)
+
+    # 2. Eliminar ORDER BY inválido dentro de CTEs
+    fixed = _remove_cte_order_by(fixed)
+    if fixed != sql:
+        logger.info("SQL corregido — ORDER BY eliminado de CTE sin TOP")
+
+    # 3. Añadir JOIN a DimDate cuando falta en un CTE que lo referencia
+    fixed = _fix_missing_dimdate_join(fixed)
+
+    # 2. Proteger contextos donde las palabras son keywords válidos
+    guarded = fixed
+    for guard_pattern, placeholder in _SQL_KEYWORD_GUARDS:
+        guarded = re.sub(guard_pattern, placeholder, guarded, flags=re.IGNORECASE)
+
+    # 3. Reemplazar alias problemáticos
+    sanitized = guarded
     for pattern, replacement in _RESERVED_ALIAS_REPLACEMENTS.items():
         sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
+
+    # 4. Restaurar keywords protegidos
+    sanitized = sanitized.replace('FETCH __NEXT__', 'FETCH NEXT')
+    sanitized = sanitized.replace('__CURRENT_', 'CURRENT_')
     return sanitized
 
 
@@ -79,9 +234,11 @@ class TrackingSqlTool(RunSqlTool):
     def __init__(self, sql_runner, on_sql_executed=None):
         super().__init__(sql_runner=sql_runner, file_system=NullFileSystem())
         self._on_sql_executed = on_sql_executed or (lambda sql: None)
+        self._in_flight: set[str] = set()
 
     def set_callback(self, callback):
         self._on_sql_executed = callback
+        self._in_flight = set()  # reset por nueva solicitud
 
     async def execute(self, context, args):
         sql = getattr(args, "sql", None)
@@ -91,6 +248,14 @@ class TrackingSqlTool(RunSqlTool):
                 logger.info("SQL sanitizado — alias reservados reemplazados")
                 args = RunSqlToolArgs(sql=sanitized)
                 sql = sanitized
+
+        sql_key = (sql or "").strip()
+        if sql_key and sql_key in self._in_flight:
+            logger.warning("TrackingSqlTool — ejecución duplicada bloqueada")
+            return None
+        if sql_key:
+            self._in_flight.add(sql_key)
+
         logger.info("TrackingSqlTool.execute() — SQL: %s", sql)
         result = await super().execute(context, args)
         if sql:
@@ -179,9 +344,14 @@ async def _generate_analysis(question: str, data_rows: list, columns: list) -> s
 
     # Construir resumen de datos para el LLM con números formateados
     rows_preview = data_rows[:10]
-    data_str = ", ".join(columns) + "\n"
-    for r in rows_preview:
-        data_str += ", ".join(_format_cell(r.get(c), c) for c in columns) + "\n"
+    if len(columns) == 1 and len(rows_preview) == 1:
+        col = columns[0]
+        val = _format_cell(rows_preview[0].get(col), col)
+        data_str = f"{col}: {val}"
+    else:
+        data_str = " | ".join(columns) + "\n"
+        for r in rows_preview:
+            data_str += " | ".join(_format_cell(r.get(c), c) for c in columns) + "\n"
 
     prompt = (
         f"Pregunta del usuario: {question}\n\n"
@@ -346,7 +516,7 @@ _SKIP_FORMAT_KEYWORDS = {
 }
 
 _PERCENT_KEYWORDS = {
-    "pct", "percent", "porcentaje", "porc", "growth", "crecimiento",
+    "pct", "percent", "porcentaje", "porc",
     "ratio", "tasa", "share", "participacion", "participación",
     "margen", "margin", "rate", "variacion", "variación",
 }
@@ -374,6 +544,208 @@ def _format_cell(v: Any, col: str = "") -> str:
             return f"{v:,}%"
         return str(v) if skip else f"{v:,}"
     return str(v)
+
+
+# ── GRÁFICOS (ECharts) ──────────────────────────────────────────────────────
+
+CHART_SENTINEL = "\x00CHART\x00"
+
+_CHART_KEYWORDS = {
+    "gráfico", "grafico", "gráfica", "grafica", "chart", "plot",
+    "visualiza", "visualización", "visualizacion", "diagrama",
+    "barras", "barra", "pastel", "torta", "dona", "donut",
+    "linea", "línea", "dispersión", "dispersion",
+}
+
+_PIE_KEYWORDS  = {"pastel", "torta", "dona", "donut", "pie"}
+_LINE_KEYWORDS = {"linea", "línea", "tendencia", "evolución", "evolucion", "histórico", "historico"}
+_TEMPORAL_COLS = {"year", "month", "quarter", "date", "año", "mes", "trimestre"}
+
+_EC_COLORS = [
+    "#4A90D9", "#E74C3C", "#2ECC71", "#F39C12",
+    "#9B59B6", "#1ABC9C", "#E67E22", "#3498DB",
+    "#27AE60", "#8E44AD",
+]
+_EC_GRAD_END = [
+    "#1a5276", "#922b21", "#1e8449", "#9a7d0a",
+    "#6c3483", "#0e6655", "#935116", "#1f618d",
+    "#196f3d", "#5b2c6f",
+]
+_EC_AREA_RGBA = [
+    "rgba(74,144,217,0.22)",  "rgba(231,76,60,0.22)",
+    "rgba(46,204,113,0.22)",  "rgba(243,156,18,0.22)",
+    "rgba(155,89,182,0.22)",  "rgba(26,188,156,0.22)",
+    "rgba(230,126,34,0.22)",  "rgba(52,152,219,0.22)",
+    "rgba(39,174,96,0.22)",   "rgba(142,68,173,0.22)",
+]
+
+
+def _is_chart_question(question: str) -> bool:
+    return any(kw in question.lower() for kw in _CHART_KEYWORDS)
+
+
+def _detect_chart_type(question: str, cols: list) -> str:
+    q = question.lower()
+    if any(kw in q for kw in _PIE_KEYWORDS):
+        return "pie"
+    if any(kw in q for kw in _LINE_KEYWORDS):
+        return "line"
+    if any(kw in " ".join(cols).lower() for kw in _TEMPORAL_COLS):
+        return "line"
+    return "bar"
+
+
+def _is_numeric_col(col: str, rows: list) -> bool:
+    has_value = False
+    for r in rows[:10]:
+        v = r.get(col)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float, Decimal)):
+            return False
+        has_value = True
+    return has_value
+
+
+def _raw_numeric(v: Any) -> float:
+    if v is None:
+        return 0.0
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    return 0.0
+
+
+def _build_chart_payload(question: str, cols: list, rows: list) -> dict:
+    if not cols or len(rows) < 1:
+        return {}
+
+    chart_type = _detect_chart_type(question, cols)
+    label_col  = cols[0]
+    value_cols = [c for c in cols[1:] if _is_numeric_col(c, rows)]
+    if not value_cols:
+        return {}
+
+    # Deduplicar por etiqueta — evita filas duplicadas por JOINs innecesarios a tablas de dimensión
+    seen: set = set()
+    deduped: list = []
+    for r in rows:
+        lbl = _safe_str(r.get(label_col, ""))
+        if lbl not in seen:
+            seen.add(lbl)
+            deduped.append(r)
+    rows = deduped
+
+    labels  = [_safe_str(r.get(label_col, "")) for r in rows]
+    rotate  = 40 if len(labels) > 6 else 0
+
+    option: dict = {
+        "backgroundColor": "transparent",
+        "color": _EC_COLORS,
+        "animation": True,
+        "animationDuration": 900,
+        "animationEasing": "cubicOut",
+        "grid": {"left": "3%", "right": "4%", "bottom": "18%", "top": "8%", "containLabel": True},
+    }
+
+    if chart_type == "pie":
+        values   = [_raw_numeric(r.get(value_cols[0])) for r in rows]
+        pie_data = [{"name": l, "value": v} for l, v in zip(labels, values)]
+        option.update({
+            "tooltip": {"trigger": "item", "formatter": "{b}<br/>{c} ({d}%)"},
+            "legend": {
+                "type": "scroll", "orient": "vertical",
+                "right": "2%", "top": "middle",
+                "textStyle": {"fontSize": 12, "color": "#333"},
+            },
+            "series": [{
+                "type": "pie",
+                "radius": ["42%", "70%"],
+                "center": ["42%", "52%"],
+                "data": pie_data,
+                "itemStyle": {"borderRadius": 7, "borderColor": "#fff", "borderWidth": 2},
+                "label": {"show": True, "formatter": "{b}\n{d}%", "fontSize": 11, "color": "#333"},
+                "labelLine": {"length": 10, "length2": 14},
+                "emphasis": {
+                    "itemStyle": {"shadowBlur": 14, "shadowColor": "rgba(0,0,0,0.25)"},
+                    "scaleSize": 8,
+                },
+            }],
+        })
+
+    elif chart_type == "line":
+        option.update({
+            "tooltip": {"trigger": "axis", "axisPointer": {"type": "cross"}},
+            "xAxis": {
+                "type": "category", "data": labels, "boundaryGap": False,
+                "axisLabel": {"rotate": rotate, "fontSize": 11, "color": "#333"},
+                "axisLine": {"lineStyle": {"color": "#ccc"}},
+            },
+            "yAxis": {"type": "value", "axisLabel": {"fontSize": 11, "color": "#333"}},
+            "series": [],
+        })
+        if len(value_cols) > 1:
+            option["legend"] = {"data": value_cols, "bottom": 0, "textStyle": {"color": "#333"}}
+        for i, vcol in enumerate(value_cols):
+            c     = _EC_COLORS[i % len(_EC_COLORS)]
+            area  = _EC_AREA_RGBA[i % len(_EC_AREA_RGBA)]
+            clear = area.replace("0.22", "0")
+            option["series"].append({
+                "name": vcol, "type": "line",
+                "data": [_raw_numeric(r.get(vcol)) for r in rows],
+                "smooth": True,
+                "symbol": "circle", "symbolSize": 7,
+                "lineStyle": {"width": 3, "color": c},
+                "itemStyle": {"color": c},
+                "areaStyle": {
+                    "color": {
+                        "type": "linear", "x": 0, "y": 0, "x2": 0, "y2": 1,
+                        "colorStops": [
+                            {"offset": 0, "color": area},
+                            {"offset": 1, "color": clear},
+                        ],
+                    }
+                },
+            })
+
+    else:  # bar
+        option.update({
+            "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+            "xAxis": {
+                "type": "category", "data": labels,
+                "axisLabel": {"rotate": rotate, "fontSize": 11, "color": "#333"},
+                "axisLine": {"lineStyle": {"color": "#ccc"}},
+            },
+            "yAxis": {"type": "value", "axisLabel": {"fontSize": 11, "color": "#333"}},
+            "series": [],
+        })
+        if len(value_cols) > 1:
+            option["legend"] = {"data": value_cols, "bottom": 0, "textStyle": {"color": "#333"}}
+        for i, vcol in enumerate(value_cols):
+            cs = _EC_COLORS[i % len(_EC_COLORS)]
+            ce = _EC_GRAD_END[i % len(_EC_GRAD_END)]
+            option["series"].append({
+                "name": vcol, "type": "bar",
+                "data": [_raw_numeric(r.get(vcol)) for r in rows],
+                "barMaxWidth": 52,
+                "itemStyle": {
+                    "borderRadius": [5, 5, 0, 0],
+                    "color": {
+                        "type": "linear", "x": 0, "y": 0, "x2": 0, "y2": 1,
+                        "colorStops": [
+                            {"offset": 0, "color": cs},
+                            {"offset": 1, "color": ce},
+                        ],
+                    },
+                },
+                "emphasis": {"itemStyle": {"opacity": 0.82}},
+            })
+
+    return option
+
+
+# ── FIN GRÁFICOS ─────────────────────────────────────────────────────────────
 
 
 _VAGUE_PLACEHOLDERS = [" de x", " a y", " del z%", " de x,", "fueron de x", "aumentaron a y",
@@ -545,6 +917,37 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "Ejemplo CTE correcto:\n"
         "  WITH YearlySales AS (...) ,\n"
         "  SalesGrowth AS (SELECT CurYear.Col FROM YearlySales CurYear JOIN YearlySales PrevYear ...)\n\n"
+        "NOMBRES DE COLUMNAS (CRÍTICO — error frecuente):\n"
+        "- DimProductCategory: usa EnglishProductCategoryName (NO ProductCategoryName ni ProductCategoryKey).\n"
+        "- DimProductSubcategory: usa EnglishProductSubcategoryName (NO ProductSubcategoryName ni ProductSubcategoryKey).\n"
+        "- DimProduct: usa EnglishProductName (NO ProductName ni ProductKey).\n"
+        "- DimSalesTerritory: usa SalesTerritoryRegion o SalesTerritoryCountry (NO SalesTerritoryKey).\n"
+        "- DimCustomer: usa FirstName + ' ' + LastName AS Cliente (NO CustomerKey).\n"
+        "- DimEmployee: usa FirstName + ' ' + LastName AS Vendedor (NO EmployeeKey).\n"
+        "- DimReseller: usa ResellerName (NO ResellerKey).\n"
+        "- DimGeography: usa City o EnglishCountryRegionName (NO GeographyKey).\n"
+        "REGLA GENERAL: en el SELECT final NUNCA expongas columnas *Key como resultado visible. "
+        "Los *Key solo sirven para JOIN — siempre muestra el nombre descriptivo de la dimensión.\n\n"
+        "PORCENTAJES (CRÍTICO):\n"
+        "SIEMPRE calcula porcentajes multiplicados por 100 para que el valor sea legible (57.0, no 0.57):\n"
+        "  SalesAmount * 100.0 / NULLIF(TotalAmount, 0) AS Percentage\n"
+        "Para análisis de concentración / Pareto ('territorios que concentran el X% de ventas'),\n"
+        "usa suma acumulada con SUM() OVER (ORDER BY col DESC) y filtra por CumulativePct:\n"
+        "  WITH Ranked AS (\n"
+        "    SELECT col, SalesAmount, Pct,\n"
+        "           SUM(Pct) OVER (ORDER BY SalesAmount DESC) AS CumulativePct\n"
+        "    FROM ...\n"
+        "  )\n"
+        "  SELECT col, SalesAmount, Pct FROM Ranked\n"
+        "  WHERE CumulativePct - Pct < 90.0   -- incluye hasta cruzar el umbral\n"
+        "  ORDER BY SalesAmount DESC\n\n"
+        "FUNCIONES DE VENTANA (CRÍTICO):\n"
+        "- LAG(), LEAD(), FIRST_VALUE(), LAST_VALUE() SIEMPRE requieren ORDER BY dentro del OVER().\n"
+        "- Correcto: LAG(col) OVER (PARTITION BY grp ORDER BY CalendarYear)\n"
+        "- NUNCA omitas el ORDER BY en el OVER de estas funciones — SQL Server lanza error 4112.\n"
+        "- Para llegar a DimProductCategory desde DimProduct usa la cadena completa:\n"
+        "  JOIN dbo.DimProductSubcategory DPSC ON DP.ProductSubcategoryKey = DPSC.ProductSubcategoryKey\n"
+        "  JOIN dbo.DimProductCategory DPC ON DPSC.ProductCategoryKey = DPC.ProductCategoryKey\n\n"
         "AÑOS Y FECHAS (CRÍTICO):\n"
         "NUNCA uses GETDATE(), YEAR(GETDATE()), ni el año actual del sistema como referencia.\n"
         "Los datos disponibles en la base de datos tienen un rango histórico fijo.\n"
@@ -554,21 +957,42 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "- Para comparaciones 'año a año' → usa los años presentes en DimDate, "
         "    haciendo JOIN de la tabla consigo misma por CalendarYear y CalendarYear+1.\n"
         "- Para 'último año disponible' → usa: (SELECT MAX(CalendarYear) FROM dbo.DimDate)\n\n"
+        "FUENTE DE VENTAS (CRÍTICO — regla absoluta):\n"
+        "Las ventas totales = FactInternetSales + FactResellerSales combinadas.\n"
+        "SIEMPRE incluye la columna Canal al hacer UNION ALL para poder distinguir la fuente:\n"
+        "  WITH AllSales AS (\n"
+        "      SELECT 'Internet' AS Canal, OrderDateKey, SalesAmount, TotalProductCost, UnitPrice\n"
+        "      FROM dbo.FactInternetSales\n"
+        "      UNION ALL\n"
+        "      SELECT 'Reseller' AS Canal, OrderDateKey, SalesAmount, TotalProductCost, UnitPrice\n"
+        "      FROM dbo.FactResellerSales\n"
+        "  )\n"
+        "Si la pregunta pide totales globales sin desglose por canal, omite la columna Canal y agrupa directamente.\n"
+        "Si la pregunta pide desglose 'por canal', incluye Canal en SELECT y GROUP BY.\n"
+        "NUNCA intentes inferir el canal desde valores de columnas después del UNION ALL.\n"
+        "Excepción: usa SOLO FactInternetSales si el usuario dice 'online', 'internet' o 'canal directo'.\n"
+        "Excepción: usa SOLO FactResellerSales si el usuario dice 'reseller', 'distribuidor' o 'canal indirecto'.\n"
+        "NUNCA uses FactResellerSalesXL_PageCompressed ni FactResellerSalesXL_CCI.\n\n"
         "ANÁLISIS DE NEGOCIO (importante):\n"
         "- Si la pregunta es analítica o estratégica, infiere la métrica más relevante "
         "(SalesAmount, OrderQuantity) y responde con datos reales.\n"
-        "- Para preguntas de regiones → usa DimSalesTerritory DST + FactInternetSales FIS.\n"
-        "- Para preguntas de productos → usa DimProduct DP + FactInternetSales FIS.\n"
-        "- Para preguntas de clientes → usa DimCustomer DC + FactInternetSales FIS.\n"
-        "- Para tendencias temporales → usa DimDate DD + FactInternetSales FIS, filtra por DD.CalendarYear.\n\n"
+        "- Para preguntas de regiones → combina ambas tablas (AllSales) + DimSalesTerritory DST.\n"
+        "- Para preguntas de productos → combina ambas tablas (AllSales) + DimProduct DP.\n"
+        "- Para preguntas de clientes → usa FactInternetSales FIS + DimCustomer DC (solo internet tiene clientes directos).\n"
+        "- Para tendencias temporales → combina ambas tablas (AllSales) + DimDate DD, filtra por DD.CalendarYear.\n\n"
         "USO DE RELACIONES:\n"
-        "- Úsalas para hacer JOIN entre tablas correctamente.\n"
-        "- Para ventas sin canal específico usa SOLO FactInternetSales FIS.\n"
-        "- Nunca uses FactResellerSalesXL_PageCompressed ni FactResellerSalesXL_CCI.\n\n"
+        "- Úsalas para hacer JOIN entre tablas correctamente.\n\n"
+        "GRÁFICOS — SQL (CRÍTICO):\n"
+        "Si el usuario pide un gráfico, la query DEBE devolver MÚLTIPLES FILAS para que sea significativa.\n"
+        "- Gráfico de ventas de UN año específico → desglose por mes: GROUP BY DD.MonthNumberOfYear ORDER BY DD.MonthNumberOfYear\n"
+        "- Gráfico de ventas sin año específico → desglose por año: GROUP BY DD.CalendarYear ORDER BY DD.CalendarYear\n"
+        "- Gráfico por categoría, producto o territorio → GROUP BY la dimensión correspondiente\n"
+        "NUNCA devuelvas una sola fila cuando se pide un gráfico. Un gráfico con 1 punto no tiene sentido.\n\n"
         "FORMATO (obligatorio):\n"
         "- Pregunta analítica simple (total, promedio, conteo, mejor/peor) → SOLO texto narrativo, sin tabla.\n"
         "- Múltiples filas con múltiples columnas (ranking, comparación, top N) → tabla seguida de un párrafo breve de análisis.\n"
         "- Resultado de 1 sola fila O 1 sola columna → SOLO texto narrativo, SIN tabla.\n"
+        "- Si se pidió un gráfico → tabla con los datos + párrafo de análisis.\n"
         "- Respeta exactamente el N de filas pedido (TOP N en el SQL).\n"
         "- NUNCA uses formato | col | col | (markdown pipe).\n\n"
         "ESQUEMA:\n"
@@ -580,7 +1004,30 @@ def _build_schema_prompt(message: str, hits: list) -> str:
     )
 
 
-_PINNED_TABLES = {"dbo.FactInternetSales"}
+_PINNED_TABLES = {"dbo.FactInternetSales", "dbo.FactResellerSales"}
+
+_GEO_COUNTRY_KEYWORDS = {
+    "país", "pais", "region", "región", "territorio",
+    "canada", "united states", "estados unidos", "australia", "germany",
+    "alemania", "france", "francia", "united kingdom", "reino unido",
+    "north america", "europe", "pacific", "norteamerica", "europa",
+}
+_GEO_CITY_KEYWORDS = {
+    "ciudad", "estado", "provincia", "código postal", "codigo postal",
+    "city", "state", "postal", "zip",
+}
+_GEO_KEYWORDS = _GEO_COUNTRY_KEYWORDS | _GEO_CITY_KEYWORDS
+_GEO_PINNED = {"dbo.DimSalesTerritory"}
+_GEO_CITY_PINNED = {"dbo.DimGeography"}
+
+_PRODUCT_CAT_KEYWORDS = {
+    "categoría", "categoria", "categorias", "categorías",
+    "subcategoría", "subcategoria", "subcategorias", "subcategorías",
+    "tipo de producto", "clase de producto", "grupo de producto",
+    "bicicletas", "ropa", "accesorios", "componentes",
+    "crecimiento por categoria", "ventas por categoria",
+}
+_PRODUCT_CAT_PINNED = {"dbo.DimProductSubcategory", "dbo.DimProductCategory"}
 
 
 def _inject_schema_rag(message: str) -> str:
@@ -595,12 +1042,21 @@ def _inject_schema_rag(message: str) -> str:
             raw_hits = SCHEMA_STORE.query(message, k=RAG_K_FETCH)
             hits = _filter_and_deduplicate(raw_hits)
 
-            # Siempre incluir tablas Fact principales aunque el RAG no las recupere
+            # Tablas siempre incluidas + geo cuando la pregunta lo requiere
+            q_lower = message.lower()
+            extra_pins = set(_PINNED_TABLES)
+            if any(kw in q_lower for kw in _GEO_KEYWORDS):
+                extra_pins |= _GEO_PINNED
+            if any(kw in q_lower for kw in _GEO_CITY_KEYWORDS):
+                extra_pins |= _GEO_CITY_PINNED
+            if any(kw in q_lower for kw in _PRODUCT_CAT_KEYWORDS):
+                extra_pins |= _PRODUCT_CAT_PINNED
+
             hit_tables = {
                 f"{h.get('meta', {}).get('schema', 'dbo')}.{h.get('meta', {}).get('table', '')}"
                 for h in hits
             }
-            for pinned in _PINNED_TABLES:
+            for pinned in extra_pins:
                 if pinned not in hit_tables:
                     pinned_table = pinned.split(".")[-1]
                     pinned_hits = SCHEMA_STORE.query(pinned_table, k=1)
@@ -635,17 +1091,34 @@ async def run_agent_stream_text(
     # 1. Cache
     cache_hit = _search_sql_cache(original_question)
     if cache_hit:
-        full_response = cache_hit.get("full_response")
-        cached_sql = cache_hit.get("sql")
+        cached_sql    = cache_hit.get("sql")
+        full_response = cache_hit.get("full_response") or ""
         has_temporals = cache_hit.get("has_temporals", False)
 
-        # Sin temporales: devolver respuesta cacheada completa
-        if full_response and not has_temporals:
-            logger.info("Cache HIT con full_response")
-            yield full_response
-            return
+        is_chart = _is_chart_question(original_question)
 
-        # Con temporales: re-ejecutar SQL y generar análisis fresco
+        # Match exacto: partir full_response en tabla + texto para que el
+        # frontend pueda animar cada sección por separado.
+        # Si es pregunta de gráfico y la respuesta cacheada no tiene tabla
+        # (fue respuesta de 1 fila), ignorar caché y regenerar con RAG.
+        if full_response and not has_temporals:
+            if is_chart and '<table' not in full_response:
+                logger.info("Cache HIT ignorado: pregunta de gráfico con respuesta sin tabla — regenerando")
+            else:
+                logger.info("Cache HIT con full_response")
+                if '<table' in full_response and '</table>' in full_response:
+                    table_end = full_response.lower().rfind('</table>') + len('</table>')
+                    yield full_response[:table_end].strip()      # → tipo 'table' → fade-in
+                    text_part = full_response[table_end:].strip()
+                    if text_part:
+                        yield text_part                          # → tipo 'text' → typewriter
+                else:
+                    yield full_response                          # respuesta solo-texto
+                return
+
+        # Con temporales: re-ejecutar SQL para obtener valores correctos.
+        # Si es pregunta de gráfico y el SQL solo devuelve 1 fila, ignorar
+        # caché y regenerar para que el LLM genere desglose por mes/categoría.
         if cached_sql and SQL_RUNNER:
             try:
                 tool_args = RunSqlToolArgs(sql=cached_sql)
@@ -653,32 +1126,40 @@ async def run_agent_stream_text(
                 logger.info("Cache HIT (SQL re-ejecutado) — %d filas", len(df))
 
                 if not df.empty:
-                    cols = df.columns.tolist()
-                    rows = df.to_dict("records")
+                    if is_chart and len(df) < 2:
+                        logger.info("Cache HIT ignorado: pregunta de gráfico con 1 fila — regenerando con RAG")
+                    else:
+                        cols = df.columns.tolist()
+                        rows = df.to_dict("records")
 
-                    # Emitir tabla
-                    html = ['<table class="data-table"><thead><tr>']
-                    for col in cols:
-                        html.append(f'<th>{_safe_str(col)}</th>')
-                    html.append('</tr></thead><tbody>')
-                    for r in rows[:MAX_ROWS_LIMIT]:
-                        html.append('<tr>')
-                        for c in cols:
-                            html.append(f'<td>{_format_cell(r.get(c, ""), c)}</td>')
-                        html.append('</tr>')
-                    html.append('</tbody></table>')
-                    yield "\n".join(html)
+                        if len(cols) > 1 and len(rows) > 1:
+                            html = ['<table class="data-table"><thead><tr>']
+                            for col in cols:
+                                html.append(f'<th>{_safe_str(col)}</th>')
+                            html.append('</tr></thead><tbody>')
+                            for r in rows[:MAX_ROWS_LIMIT]:
+                                html.append('<tr>')
+                                for c in cols:
+                                    html.append(f'<td>{_format_cell(r.get(c, ""), c)}</td>')
+                                html.append('</tr>')
+                            html.append('</tbody></table>')
+                            yield "\n".join(html)
 
-                    # Generar análisis fresco con los datos reales
-                    analysis = await _generate_analysis(original_question, rows, cols)
-                    if analysis:
-                        yield analysis
+                        analysis = await _generate_analysis(original_question, rows, cols)
+                        if analysis:
+                            yield analysis
+
+                        if is_chart:
+                            chart_payload = _build_chart_payload(original_question, cols, rows)
+                            if chart_payload:
+                                yield CHART_SENTINEL + json.dumps(chart_payload)
+                                logger.info("Gráfico ECharts generado desde cache")
+                        return
                 else:
                     yield "La consulta no devolvió resultados."
-
-                return
+                    return
             except Exception:
-                logger.exception("Error ejecutando SQL desde cache, continuando con flujo normal")
+                logger.exception("Error re-ejecutando SQL desde cache, continuando con flujo normal")
 
     # 2. RAG
     message = _inject_schema_rag(message)
@@ -752,7 +1233,6 @@ async def run_agent_stream_text(
         elif captured_sql and SQL_RUNNER:
             if post_table_chunks:
                 logger.warning("Análisis del LLM detectado como vago — reemplazando con fallback")
-            # Usar el último SQL capturado (el más reciente, probablemente el corregido)
             best_sql = captured_sql[-1]
             try:
                 tool_args = RunSqlToolArgs(sql=best_sql)
@@ -770,7 +1250,6 @@ async def run_agent_stream_text(
     elif captured_sql and SQL_RUNNER:
         # El stream produjo output vacío pero el SQL fue ejecutado — fallback completo
         logger.warning("Stream vacío con SQL capturado — activando fallback de renderizado")
-        # Intentar SQLs en orden inverso (el último es el más reciente y probablemente correcto)
         df = None
         for sql_attempt in reversed(captured_sql):
             try:
@@ -821,7 +1300,24 @@ async def run_agent_stream_text(
             response_chunks.append(chunk)
             yield chunk
 
-    # 6. Guardar en cache — usar el último SQL capturado (más reciente y probablemente correcto)
+    # 6. Gráfico (si el usuario lo pidió y hay SQL disponible)
+    if _is_chart_question(original_question) and captured_sql and SQL_RUNNER:
+        try:
+            tool_args = RunSqlToolArgs(sql=captured_sql[-1])
+            df = await SQL_RUNNER.run_sql(tool_args, None)
+            if not df.empty and len(df.columns) >= 2 and len(df) >= 1:
+                chart_payload = _build_chart_payload(
+                    original_question,
+                    df.columns.tolist(),
+                    df.to_dict("records"),
+                )
+                if chart_payload:
+                    yield CHART_SENTINEL + json.dumps(chart_payload)
+                    logger.info("Gráfico ECharts generado y enviado")
+        except Exception:
+            logger.exception("Error generando gráfico")
+
+    # 7. Guardar en cache — usar el último SQL capturado (más reciente y probablemente correcto)
     if captured_sql:
         _store_sql_cache(
             original_question,
