@@ -16,3 +16,9 @@ __pycache__/
 .venv/
 
 backend/vanna_chromadb/
+
+# backups y archivos pesados
+*.bak
+
+# macos
+.DS_Store

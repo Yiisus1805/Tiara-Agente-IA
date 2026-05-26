@@ -100,6 +100,7 @@ typing_extensions==4.15.0
 tzdata==2025.3
 urllib3==2.6.3
 uvicorn==0.40.0
+gunicorn==23.0.0
 vanna==2.0.1
 watchfiles==1.1.1
 websocket-client==1.9.0

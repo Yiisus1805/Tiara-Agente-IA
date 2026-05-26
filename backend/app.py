@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from vanna.core.user import RequestContext
 
@@ -45,6 +46,19 @@ def build_request_context(request: Request) -> RequestContext:
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "TIARA"}
+
+
+@app.get("/api/test-db")
+async def test_db():
+    from .agent_logic import SQL_RUNNER
+    try:
+        if SQL_RUNNER is None:
+            return JSONResponse({"status": "error", "message": "SQL_RUNNER no inicializado"}, status_code=500)
+        with SQL_RUNNER.engine.connect() as conn:
+            rows = conn.execute(text("SELECT TOP 5 name FROM sys.tables ORDER BY name")).fetchall()
+        return {"status": "ok", "tables": [r[0] for r in rows]}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.get("/")
