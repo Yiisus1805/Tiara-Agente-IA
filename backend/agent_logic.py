@@ -393,7 +393,10 @@ def _init_sql_cache(base_persist_dir: str):
     os.makedirs(cache_path, exist_ok=True)
 
     client = PersistentClient(path=cache_path)
-    embedding_function = embedding_functions.DefaultEmbeddingFunction()
+    embedding_function = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model_name="text-embedding-3-small",
+    )
 
     try:
         existing = client.get_collection(name="tiara_sql_cache")
@@ -401,7 +404,7 @@ def _init_sql_cache(base_persist_dir: str):
         existing_space = existing_meta.get("hnsw:space", "l2")
         existing_ef = existing_meta.get("embedding_function", "")
 
-        needs_recreate = existing_space != "cosine" or "openai" in existing_ef.lower()
+        needs_recreate = existing_space != "cosine" or existing_ef != "openai"
         if needs_recreate:
             logger.warning("Cache incompatible (space=%s, ef=%s). Recreando.", existing_space, existing_ef)
             client.delete_collection("tiara_sql_cache")
@@ -411,7 +414,7 @@ def _init_sql_cache(base_persist_dir: str):
     SQL_CACHE = client.get_or_create_collection(
         name="tiara_sql_cache",
         embedding_function=embedding_function,
-        metadata={"hnsw:space": "cosine", "embedding_function": "default"},
+        metadata={"hnsw:space": "cosine", "embedding_function": "openai"},
     )
     logger.info("SQL Cache inicializado (%d entradas)", SQL_CACHE.count())
 

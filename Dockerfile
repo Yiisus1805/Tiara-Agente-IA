@@ -23,6 +23,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
-
 CMD gunicorn backend.app:app -w 1 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT

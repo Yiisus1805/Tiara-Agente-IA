@@ -39,9 +39,10 @@ class SchemaVectorStore:
                 "Para esquema local usa embedding_mode='default'"
             )
 
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="paraphrase-multilingual-MiniLM-L12-v2"
-)
+        self.embedding_function = embedding_functions.OpenAIEmbeddingFunction(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model_name="text-embedding-3-small",
+        )
 
         # Si la colección existente no tiene hnsw:space=cosine, la recreamos
         try:
