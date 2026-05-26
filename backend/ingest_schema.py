@@ -10,14 +10,6 @@ load_dotenv()
 
 ODBC = os.getenv("SQLSERVER_ODBC")
 
-SCHEMA_DIR = "backend/vanna_chromadb/schema_store"
-
-store = SchemaVectorStore(
-    persist_dir=SCHEMA_DIR,
-    collection_name="tiara_schema",
-    embedding_mode="default",
-)
-
 
 # Diccionario semantico
 # Cada entrada combina: sinónimos en español, nombres de columnas clave y
@@ -463,13 +455,23 @@ Uso:
 
 # INGEST
 
-def ingest():
+def ingest(target_store=None):
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if target_store is None:
+        target_store = SchemaVectorStore(
+            persist_dir="backend/vanna_chromadb/schema_store",
+            collection_name=os.getenv("SCHEMA_COLLECTION") or "tiara_schema",
+            embedding_mode="default",
+        )
 
     conn = get_connection()
     cursor = conn.cursor()
 
     tables = fetch_tables(cursor)
 
+    logger.info("Tablas encontradas: %d", len(tables))
     print(f"\nTablas encontradas: {len(tables)}\n")
 
     count = 0
@@ -488,15 +490,17 @@ def ingest():
             relations,
         )
 
-        store.upsert(
+        target_store.upsert(
             ids=[f"{schema}.{table}"],
             documents=[doc],
             metadatas=[{"schema": schema, "table": table}],
         )
 
+        logger.info("Indexed %s.%s", schema, table)
         print(f"Indexed {schema}.{table}")
         count += 1
 
+    logger.info("Total tablas indexadas: %d", count)
     print(f"\nTotal tablas indexadas: {count}")
 
 # MAIN

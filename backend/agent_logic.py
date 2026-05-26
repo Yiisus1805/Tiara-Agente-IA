@@ -1374,6 +1374,15 @@ def build_agent() -> Agent:
         embedding_mode="default",
     )
 
+    if SCHEMA_STORE.count() == 0:
+        logger.info("Schema store vacío — ejecutando ingest automático del esquema SQL")
+        try:
+            from .ingest_schema import ingest as _ingest
+            _ingest(target_store=SCHEMA_STORE)
+            logger.info("Auto-ingest completado: %d entradas", SCHEMA_STORE.count())
+        except Exception:
+            logger.exception("Error en auto-ingest del esquema — el agente continuará sin RAG de esquema")
+
     return Agent(
         llm_service=llm,
         tool_registry=tools,
