@@ -91,5 +91,8 @@ class SqlServerRunner(SqlRunner):
             with self.engine.connect() as conn:
                 return pd.read_sql(text(sql), conn)
 
-        return await asyncio.to_thread(_query)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_query), timeout=75.0)
+        except asyncio.TimeoutError:
+            raise ValueError("La consulta tardó demasiado (>75s). Intenta reformular la pregunta.")
 
