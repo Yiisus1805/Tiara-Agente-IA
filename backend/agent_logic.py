@@ -363,6 +363,7 @@ async def _generate_analysis(question: str, data_rows: list, columns: list) -> s
         "- NUNCA uses frases vagas como 'el especificado en la consulta', 'los datos muestran', "
         "'según los resultados', 'el territorio analizado'. Si tienes el nombre, úsalo.\n"
         "- Si hay un número ganador (mejor, mayor, top), menciónalo primero.\n"
+        "- NÚMEROS: usa SIEMPRE coma como separador de miles y punto como decimal: 16,351,550.34 (NO 16.351.550,34).\n"
         "- Sin markdown, bullets ni encabezados. Solo texto narrativo directo."
     )
 
@@ -535,6 +536,11 @@ def _format_cell(v: Any, col: str = "") -> str:
         return ""
     if isinstance(v, bool):
         return str(v)
+    if isinstance(v, str):
+        try:
+            v = Decimal(v)
+        except Exception:
+            return v
     skip = any(kw in col.lower() for kw in _SKIP_FORMAT_KEYWORDS)
     is_pct = _is_percent_col(col)
     if isinstance(v, (float, Decimal)):
@@ -997,7 +1003,8 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "- Resultado de 1 sola fila O 1 sola columna → SOLO texto narrativo, SIN tabla.\n"
         "- Si se pidió un gráfico → tabla con los datos + párrafo de análisis.\n"
         "- Respeta exactamente el N de filas pedido (TOP N en el SQL).\n"
-        "- NUNCA uses formato | col | col | (markdown pipe).\n\n"
+        "- NUNCA uses formato | col | col | (markdown pipe).\n"
+        "- NÚMEROS: usa SIEMPRE coma como separador de miles y punto como decimal: 16,351,550.34 (NO 16.351.550,34).\n\n"
         "ESQUEMA:\n"
         f"{schema_lines}\n\n"
         f"PREGUNTA: {message}\n\n"
