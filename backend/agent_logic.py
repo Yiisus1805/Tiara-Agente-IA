@@ -586,6 +586,21 @@ def _store_sql_cache(
         logger.exception("Error guardando en cache")
 
 
+def _evict_sql_cache(question: str):
+    """Elimina del cache las entradas asociadas a una pregunta (útil tras corrección de SQL)."""
+    if not SQL_CACHE:
+        return
+    try:
+        normalized = _normalize_question(question)
+        results = SQL_CACHE.query(query_texts=[normalized], n_results=3)
+        ids = (results.get("ids") or [[]])[0]
+        if ids:
+            SQL_CACHE.delete(ids=ids)
+            logger.info("Cache purgado para '%s' (%d entradas eliminadas)", normalized, len(ids))
+    except Exception:
+        logger.exception("Error purgando cache")
+
+
 # Helpers de texto
 
 def _clean_markdown(text: str) -> str:
@@ -1128,8 +1143,8 @@ _GEO_CITY_KEYWORDS = {
     "city", "state", "postal", "zip",
 }
 _GEO_KEYWORDS = _GEO_COUNTRY_KEYWORDS | _GEO_CITY_KEYWORDS
-_GEO_PINNED = {"dbo.DimSalesTerritory"}
-_GEO_CITY_PINNED = {"dbo.DimGeography"}
+_GEO_PINNED = {"dbo.DimSalesTerritory", "dbo.DimGeography", "dbo.DimCustomer"}
+_GEO_CITY_PINNED = {"dbo.DimGeography", "dbo.DimCustomer"}
 
 _PRODUCT_CAT_KEYWORDS = {
     "categoría", "categoria", "categorias", "categorías",
@@ -1387,6 +1402,7 @@ async def run_agent_stream_text(
                         df = await SQL_RUNNER.run_sql(RunSqlToolArgs(sql=corrected_sql), None)
                         if not df.empty:
                             captured_sql[-1] = corrected_sql
+                            _evict_sql_cache(original_question)
                             logger.info("Retry exitoso tras corrección LLM (0 filas → %d filas)", len(df))
                     except Exception as e:
                         logger.warning("Retry SQL también falló: %s", e)
