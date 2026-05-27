@@ -760,10 +760,17 @@ def _build_chart_payload(question: str, cols: list, rows: list) -> dict:
 _VAGUE_PLACEHOLDERS = [" de x", " a y", " del z%", " de x,", "fueron de x", "aumentaron a y",
                        "ventas de x", "total de x", " x millones", " y millones"]
 
+# Detecta alias de columnas SQL usados como placeholders en el texto (ej: "TotalSalesAmount")
+_SQL_ALIAS_AS_PLACEHOLDER = re.compile(
+    r'\b[A-Z][a-zA-Z]*(Amount|Sales|Total|Count|Revenue|Cost|Price|Quantity|Value|Sum|Avg|Average)\b'
+)
+
 
 def _is_vague_analysis(text: str) -> bool:
     lower = text.lower()
-    return any(p in lower for p in _VAGUE_PLACEHOLDERS)
+    if any(p in lower for p in _VAGUE_PLACEHOLDERS):
+        return True
+    return bool(_SQL_ALIAS_AS_PLACEHOLDER.search(text))
 
 
 def _should_hide_text(text: str) -> bool:
@@ -1305,10 +1312,31 @@ async def run_agent_stream_text(
             logger.exception("Error en fallback de renderizado")
             yield "Ocurrió un error al procesar los resultados."
     else:
-        # Sin SQL capturado — emitir texto conversacional del LLM (si lo hay)
-        for chunk in pre_table_buffer:
-            response_chunks.append(chunk)
-            yield chunk
+        combined_pre = " ".join(pre_table_buffer)
+        if pre_table_buffer and _is_vague_analysis(combined_pre) and captured_sql and SQL_RUNNER:
+            logger.warning("Texto del LLM detectado como vago (alias de columna) — regenerando con datos reales")
+            try:
+                tool_args = RunSqlToolArgs(sql=captured_sql[-1])
+                df = await SQL_RUNNER.run_sql(tool_args, None)
+                if not df.empty:
+                    cols = df.columns.tolist()
+                    rows = df.to_dict("records")
+                    analysis = await _generate_analysis(original_question, rows, cols)
+                    if analysis:
+                        response_chunks.append(analysis)
+                        yield analysis
+                        logger.info("Análisis de reemplazo generado correctamente")
+                        # reemplazar también en pre_table_buffer para el cache
+                        pre_table_buffer[:] = [analysis]
+            except Exception:
+                logger.exception("Error regenerando análisis desde texto vago")
+                for chunk in pre_table_buffer:
+                    response_chunks.append(chunk)
+                    yield chunk
+        else:
+            for chunk in pre_table_buffer:
+                response_chunks.append(chunk)
+                yield chunk
 
     # 6. Gráfico (si el usuario lo pidió y hay SQL disponible)
     if _is_chart_question(original_question) and captured_sql and SQL_RUNNER:
