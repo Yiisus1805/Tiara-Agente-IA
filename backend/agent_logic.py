@@ -230,15 +230,93 @@ def _sanitize_sql_aliases(sql: str) -> str:
     return sanitized
 
 
+# ── VALIDACIÓN Y CORRECCIÓN DE SQL ───────────────────────────────────────────
+
+_JOIN_ON_RE = re.compile(
+    r'\bON\s+(?:\w+\.)?(\w+)\s*=\s*(?:\w+\.)?(\w+)',
+    re.IGNORECASE,
+)
+
+
+def _keys_compatible(k1: str, k2: str) -> bool:
+    """Dos *Key columns son compatibles si uno es sufijo del otro (ej. DateKey / OrderDateKey)."""
+    a, b = k1.lower(), k2.lower()
+    return a == b or a.endswith(b) or b.endswith(a)
+
+
+def _validate_sql_joins(sql: str) -> list[str]:
+    """Detecta JOINs semánticamente imposibles entre columnas *Key de tipos distintos."""
+    errors = []
+    for m in _JOIN_ON_RE.finditer(sql):
+        left, right = m.group(1), m.group(2)
+        if left.lower().endswith("key") and right.lower().endswith("key"):
+            if not _keys_compatible(left, right):
+                errors.append(
+                    f"JOIN con columnas incompatibles: {left} = {right}"
+                )
+    return errors
+
+
+async def _get_corrected_sql(question: str, bad_sql: str, problem: str) -> Optional[str]:
+    """Llama al LLM con el SQL problemático y el error para obtener una versión corregida."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    if not api_key:
+        return None
+
+    schema_context = ""
+    if SCHEMA_STORE:
+        try:
+            hits = SCHEMA_STORE.query(question, k=6)
+            schema_context = "\n".join(h.get("doc", "") for h in hits if h.get("doc"))
+        except Exception:
+            pass
+
+    prompt = (
+        f"Pregunta del usuario: {question}\n\n"
+        f"SQL generado con error:\n{bad_sql}\n\n"
+        f"Problema detectado: {problem}\n\n"
+        f"Esquema disponible:\n{schema_context}\n\n"
+        "Escribe ÚNICAMENTE el SQL corregido, sin explicaciones ni bloques markdown."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "max_tokens": 800,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            raw = response.json()["choices"][0]["message"]["content"].strip()
+            # Eliminar bloques de código markdown si el LLM los incluyó
+            raw = re.sub(r"^```(?:sql)?\s*", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"\s*```$", "", raw)
+            return raw.strip() or None
+    except Exception:
+        logger.exception("Error obteniendo SQL corregido del LLM")
+        return None
+
+
+# ── FIN VALIDACIÓN Y CORRECCIÓN ───────────────────────────────────────────────
+
+
 class TrackingSqlTool(RunSqlTool):
     def __init__(self, sql_runner, on_sql_executed=None):
         super().__init__(sql_runner=sql_runner, file_system=NullFileSystem())
         self._on_sql_executed = on_sql_executed or (lambda sql: None)
         self._in_flight: set[str] = set()
+        self._current_question: str = ""
 
     def set_callback(self, callback):
         self._on_sql_executed = callback
-        self._in_flight = set()  # reset por nueva solicitud
+        self._in_flight = set()
+
+    def set_question(self, question: str):
+        self._current_question = question
 
     async def execute(self, context, args):
         sql = getattr(args, "sql", None)
@@ -248,6 +326,16 @@ class TrackingSqlTool(RunSqlTool):
                 logger.info("SQL sanitizado — alias reservados reemplazados")
                 args = RunSqlToolArgs(sql=sanitized)
                 sql = sanitized
+
+            join_errors = _validate_sql_joins(sql)
+            if join_errors and self._current_question:
+                problem = "; ".join(join_errors)
+                logger.warning("JOIN inválido detectado: %s — solicitando corrección al LLM", problem)
+                corrected = await _get_corrected_sql(self._current_question, sql, problem)
+                if corrected and corrected != sql:
+                    logger.info("SQL corregido por LLM antes de ejecutar")
+                    args = RunSqlToolArgs(sql=corrected)
+                    sql = corrected
 
         sql_key = (sql or "").strip()
         if sql_key and sql_key in self._in_flight:
@@ -1197,6 +1285,7 @@ async def run_agent_stream_text(
 
     if TRACKING_TOOL:
         TRACKING_TOOL.set_callback(on_sql_executed)
+        TRACKING_TOOL.set_question(original_question)
         logger.info("TrackingSqlTool callback actualizado (id=%s)", id(TRACKING_TOOL))
     else:
         logger.warning("TRACKING_TOOL no inicializado")
@@ -1286,6 +1375,22 @@ async def run_agent_stream_text(
             yield "Ocurrió un error al procesar los resultados."
             return
         try:
+            if df.empty:
+                logger.warning("Fallback devolvió 0 filas — intentando corrección LLM")
+                corrected_sql = await _get_corrected_sql(
+                    original_question,
+                    captured_sql[-1],
+                    "La consulta devolvió 0 resultados — revisa los JOINs y filtros",
+                )
+                if corrected_sql:
+                    try:
+                        df = await SQL_RUNNER.run_sql(RunSqlToolArgs(sql=corrected_sql), None)
+                        if not df.empty:
+                            captured_sql[-1] = corrected_sql
+                            logger.info("Retry exitoso tras corrección LLM (0 filas → %d filas)", len(df))
+                    except Exception as e:
+                        logger.warning("Retry SQL también falló: %s", e)
+
             if not df.empty:
                 cols = df.columns.tolist()
                 rows = df.to_dict("records")
