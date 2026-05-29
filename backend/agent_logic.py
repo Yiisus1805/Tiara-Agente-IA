@@ -774,7 +774,12 @@ def _fix_eu_numbers(text: str) -> str:
         integer = m.group(1).replace('.', ',')
         decimals = m.group(2)
         return f"{integer}.{decimals}" if decimals else integer
-    return _EU_NUMBER_RE.sub(_to_us, text)
+    text = _EU_NUMBER_RE.sub(_to_us, text)
+    # Decimal con coma en porcentajes: 46,69% → 46.69%
+    text = re.sub(r'(-?\d+),(\d{1,4})%', r'\1.\2%', text)
+    # Decimal con coma en números negativos o sueltos: -99,91 → -99.91
+    text = re.sub(r'(-\d+),(\d{2})\b', r'\1.\2', text)
+    return text
 
 
 def _clean_markdown(text: str) -> str:
@@ -797,7 +802,7 @@ _SKIP_FORMAT_KEYWORDS = {
 }
 
 _PERCENT_KEYWORDS = {
-    "pct", "percent", "porcentaje", "porc",
+    "pct", "percent", "percentage", "porcentaje", "porc",
     "ratio", "tasa", "share", "participacion", "participación",
     "margen", "margin", "rate", "variacion", "variación",
 }
