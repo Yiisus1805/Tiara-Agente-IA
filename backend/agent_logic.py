@@ -153,36 +153,54 @@ def _fix_window_order_by(sql: str) -> str:
     return re.sub(r'\bOVER\s*\(([^()]*)\)', _patch, sql, flags=re.IGNORECASE)
 
 
+def _extract_cte_spans(sql: str) -> list[tuple[int, int]]:
+    """Devuelve (inicio, fin) del contenido de cada CTE usando conteo de paréntesis."""
+    spans = []
+    for m in re.finditer(r'\bAS\s*\(', sql, re.IGNORECASE):
+        start = m.end()
+        depth, pos = 1, start
+        while pos < len(sql) and depth > 0:
+            if sql[pos] == '(':
+                depth += 1
+            elif sql[pos] == ')':
+                depth -= 1
+            pos += 1
+        spans.append((start, pos - 1))
+    return spans
+
+
 def _fix_missing_dimdate_join(sql: str) -> str:
     """Añade JOIN a DimDate en CTEs que usan DD. pero olvidaron el JOIN."""
     dimdate_join = "JOIN dbo.DimDate DD ON FIS.OrderDateKey = DD.DateKey"
+    result = sql
+    offset = 0
 
-    def _patch_cte(m: re.Match) -> str:
-        body = m.group(0)
-        # Solo actuar si el cuerpo usa DD. pero no tiene DimDate
+    for start, end in _extract_cte_spans(sql):
+        body = result[start + offset: end + offset]
+
         if not re.search(r'\bDD\.', body, re.IGNORECASE):
-            return body
+            continue
         if re.search(r'\bDimDate\b', body, re.IGNORECASE):
-            return body
-        # Insertar el JOIN después del primer JOIN/FROM que referencie FIS
-        patched = re.sub(
-            r'(JOIN\s+dbo\.\w+\s+(?:FIS|DST|DP|DC|DR)\s+ON\s+FIS\.\w+\s*=\s*\w+\.\w+)',
-            r'\1\n    ' + dimdate_join,
-            body,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-        if patched != body:
-            logger.info("SQL corregido — JOIN dbo.DimDate añadido a CTE sin él")
-        return patched
+            continue
 
-    # Aplicar sobre cada bloque CTE: AS ( ... )
-    return re.sub(
-        r'AS\s*\(SELECT[\s\S]*?\)',
-        _patch_cte,
-        sql,
-        flags=re.IGNORECASE,
-    )
+        # Insertar después del último JOIN que referencie una tabla conocida
+        last_join = None
+        for m in re.finditer(
+            r'JOIN\s+dbo\.\w+\s+(?:FIS|DST|DP|DC|DR|FRS)\s+ON\s+\w+\.\w+\s*=\s*\w+\.\w+',
+            body, re.IGNORECASE,
+        ):
+            last_join = m
+
+        if not last_join:
+            continue
+
+        insert_at = start + offset + last_join.end()
+        addition = f"\n    {dimdate_join}"
+        result = result[:insert_at] + addition + result[insert_at:]
+        offset += len(addition)
+        logger.info("SQL corregido — JOIN dbo.DimDate DD añadido a CTE que usaba DD. sin él")
+
+    return result
 
 
 _LANG_PREFIX_FIXES = [
@@ -264,6 +282,14 @@ def _validate_sql_joins(sql: str) -> list[str]:
                 errors.append(
                     f"JOIN con columnas incompatibles: {left} = {right}"
                 )
+
+    # Detecta uso de alias DD. sin JOIN a DimDate (error frecuente del LLM)
+    if re.search(r'\bDD\.', sql, re.IGNORECASE):
+        if not re.search(r'\bDimDate\b', sql, re.IGNORECASE):
+            errors.append(
+                "SQL usa DD. (alias de DimDate) pero falta JOIN dbo.DimDate DD ON FIS.OrderDateKey = DD.DateKey"
+            )
+
     return errors
 
 
@@ -1018,7 +1044,7 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "2. Llama a run_sql EXACTAMENTE UNA VEZ. ABSOLUTAMENTE PROHIBIDO ejecutar run_sql más de una vez.\n"
         "   Si necesitas múltiples datos, combínalos en UNA sola query con CTEs o subconsultas.\n"
         "   Si la query falla NO reintentes — reporta el error exacto al usuario.\n"
-        "   Para filtrar por año en DimDate usa SIEMPRE: WHERE D.CalendarYear IN (...)\n"
+        "   Para filtrar por año en DimDate usa SIEMPRE: JOIN dbo.DimDate DD ON FIS.OrderDateKey = DD.DateKey — luego WHERE DD.CalendarYear IN (...)\n"
         "3. Para limitar filas usa TOP N al inicio: SELECT TOP N ... (nunca al final).\n"
         "4. No menciones CSV, archivos, ni muestres el SQL generado.\n"
         "5. No uses **, ##, ni markdown en tus respuestas.\n"
