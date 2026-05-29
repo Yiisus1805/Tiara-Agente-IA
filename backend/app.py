@@ -126,6 +126,23 @@ async def tiara_chat_stream(request: Request):
         )
 
 
+@app.post("/api/admin/ingest")
+async def force_ingest(request: Request):
+    """Re-indexa el esquema SQL completo (tablas + join paths). Usar tras deploy."""
+    from .agent_logic import SCHEMA_STORE
+    from .ingest_schema import ingest as _ingest
+    try:
+        if SCHEMA_STORE is None:
+            return JSONResponse({"error": "SCHEMA_STORE no inicializado"}, status_code=500)
+        SCHEMA_STORE.reset()
+        _ingest(target_store=SCHEMA_STORE)
+        total = SCHEMA_STORE.count()
+        return JSONResponse({"status": "ok", "documentos_indexados": total})
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.delete("/api/tiara/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str):
     return JSONResponse(
