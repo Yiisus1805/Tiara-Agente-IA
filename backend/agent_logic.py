@@ -1221,6 +1221,16 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "- Para preguntas de productos → combina ambas tablas (AllSales) + DimProduct DP.\n"
         "- Para preguntas de clientes → usa FactInternetSales FIS + DimCustomer DC (solo internet tiene clientes directos).\n"
         "- Para tendencias temporales → combina ambas tablas (AllSales) + DimDate DD, filtra por DD.CalendarYear.\n\n"
+        "NOMBRES DE PERSONAS (CRÍTICO — error frecuente):\n"
+        "Cuando la pregunta menciona un nombre de persona, determina si es VENDEDOR o CLIENTE:\n"
+        "  VENDEDOR (ej: 'ventas de Linda Mitchell', 'cuánto vendió', 'mejor vendedor', 'rendimiento de'):\n"
+        "    → DimEmployee DE + FactResellerSales FRS ON FRS.EmployeeKey = DE.EmployeeKey\n"
+        "    → filtra: WHERE DE.FirstName = 'Linda' AND DE.LastName = 'Mitchell'\n"
+        "  CLIENTE (ej: 'compras de', 'pedidos de', 'cuánto gastó', 'historial de compra'):\n"
+        "    → DimCustomer DC + FactInternetSales FIS ON FIS.CustomerKey = DC.CustomerKey\n"
+        "    → filtra: WHERE DC.FirstName = 'Linda' AND DC.LastName = 'Mitchell'\n"
+        "NUNCA cruces DimEmployee con DimCustomer ni mezcles FactResellerSales con DimCustomer "
+        "para buscar a una persona — son tablas independientes.\n\n"
         "USO DE RELACIONES:\n"
         "- Úsalas para hacer JOIN entre tablas correctamente.\n\n"
         "GRÁFICOS — SQL (CRÍTICO):\n"
@@ -1602,14 +1612,19 @@ async def run_agent_stream_text(
         except Exception:
             logger.exception("Error generando gráfico")
 
-    # 7. Guardar en cache — usar el último SQL capturado (más reciente y probablemente correcto)
+    # 7. Guardar en cache — solo si la respuesta tiene contenido real (no "0 resultados")
+    _NO_RESULTS_MSG = "La consulta no devolvió resultados."
     if captured_sql:
-        _store_sql_cache(
-            original_question,
-            captured_sql[-1],
-            full_response="\n".join(response_chunks),
-        )
-        logger.info("SQL guardado en cache para: '%s'", original_question)
+        combined_response = "\n".join(response_chunks)
+        if combined_response.strip() and combined_response.strip() != _NO_RESULTS_MSG:
+            _store_sql_cache(
+                original_question,
+                captured_sql[-1],
+                full_response=combined_response,
+            )
+            logger.info("SQL guardado en cache para: '%s'", original_question)
+        else:
+            logger.info("No se guarda en cache: respuesta vacía o sin resultados")
     else:
         logger.info("No se capturó SQL, no se guarda en cache")
 
