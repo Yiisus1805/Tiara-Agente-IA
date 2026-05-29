@@ -1209,8 +1209,11 @@ _CAPABILITY_RE = re.compile(
     r'qu[eé]\s+tipo\s+de|qu[eé]\s+informaci[oó]n|qu[eé]\s+datos?\s+tienes?|'
     r'qu[eé]\s+consultas?\s+puedo|c[oó]mo\s+funciona|'
     r'para\s+qu[eé]\s+sirv|qu[eé]\s+haces?|qu[eé]\s+sabes?|'
-    r'qu[eé]\s+puedes?\s+hacer|capacidades?|sobre\s+qu[eé]\s+puedo|'
-    r'de\s+qu[eé]\s+puedo|qu[eé]\s+temas?\s+cubres?)\b',
+    r'qu[eé]\s+puedes?\s+(hacer|responder|analizar|predecir|calcular|mostrar|decir|consultar)|'
+    r'puedes?\s+(responder|analizar|predecir|hacer|ayudar|calcular|mostrar|decirme|consultar)|'
+    r'capacidades?|sobre\s+qu[eé]\s+puedo|de\s+qu[eé]\s+puedo|'
+    r'qu[eé]\s+temas?\s+cubres?|preguntas?\s+predictivas?|'
+    r'tienes?\s+acceso|tienes?\s+informaci[oó]n\s+sobre|tienes?\s+datos?\s+(de|sobre))\b',
     re.IGNORECASE,
 )
 
