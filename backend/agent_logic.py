@@ -503,7 +503,7 @@ async def _generate_analysis(question: str, data_rows: list, columns: list) -> s
                 },
             )
             data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
+            return _fix_eu_numbers(data["choices"][0]["message"]["content"].strip())
     except Exception:
         logger.exception("Error generando análisis fresco")
         return ""
@@ -638,6 +638,19 @@ def _evict_sql_cache(question: str):
 
 
 # Helpers de texto
+
+# Detecta números en formato europeo: 4.096.554,84 o 1.234.567
+_EU_NUMBER_RE = re.compile(r'\b(\d{1,3}(?:\.\d{3})+)(?:,(\d+))?\b')
+
+
+def _fix_eu_numbers(text: str) -> str:
+    """Convierte números europeos (1.234.567,89) a formato US (1,234,567.89)."""
+    def _to_us(m: re.Match) -> str:
+        integer = m.group(1).replace('.', ',')
+        decimals = m.group(2)
+        return f"{integer}.{decimals}" if decimals else integer
+    return _EU_NUMBER_RE.sub(_to_us, text)
+
 
 def _clean_markdown(text: str) -> str:
     text = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', text)
@@ -976,7 +989,7 @@ def extract_text_from_component(component: Any) -> str:
             text = content.strip()
             if _should_hide_text(text) or _is_row_enumeration(text) or _is_markdown_table_text(text):
                 return ""
-            return _clean_markdown(text)
+            return _fix_eu_numbers(_clean_markdown(text))
 
         return ""
 
@@ -987,7 +1000,7 @@ def extract_text_from_component(component: Any) -> str:
             text = text.strip()
             if _should_hide_text(text) or _is_row_enumeration(text) or _is_markdown_table_text(text):
                 return ""
-            return _clean_markdown(text)
+            return _fix_eu_numbers(_clean_markdown(text))
 
     return ""
 
