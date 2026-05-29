@@ -1173,6 +1173,113 @@ def _is_discovery_question(message: str) -> bool:
     return any(kw in message.lower() for kw in DISCOVERY_KEYWORDS)
 
 
+# ── DETECCIÓN DE SALUDOS ───────────────────────────────────────────────────────
+
+_GREETING_EXACT = frozenset({
+    "hola", "hi", "hey", "hello", "buenas", "saludos",
+    "buenos días", "buenos dias", "buenas tardes", "buenas noches",
+    "gracias", "muchas gracias", "thank you", "thanks",
+    "adiós", "adios", "hasta luego", "bye", "chao", "chau",
+    "hasta pronto", "nos vemos", "ok", "okay", "bien",
+    "¿cómo estás?", "como estas", "cómo estás", "¿como estas?",
+    "¿qué tal?", "que tal", "¿qué hay?", "que hay",
+    "¿quién eres?", "quien eres", "¿qué eres?", "que eres",
+    "¿qué puedes hacer?", "que puedes hacer",
+    "¿para qué sirves?", "para que sirves",
+    "¿me puedes ayudar?", "me puedes ayudar", "ayuda", "help",
+})
+
+_GREETING_PREFIX_RE = re.compile(
+    r'^(hola|hi|hey|hello|buenas?|buenos\s+d[ií]as?|buenas?\s+tardes?|buenas?\s+noches?)[\s!¡.,]*$',
+    re.IGNORECASE,
+)
+
+_ANALYTIC_INDICATOR_RE = re.compile(
+    r'\b(cu[aá]nto|cu[aá]l|cu[aá]ntos|cu[aá]les|cu[aá]ndo|d[oó]nde|'
+    r'ventas?|producto|cliente|empleado|a[nñ]o|mes|trimestre|regi[oó]n|'
+    r'total|suma|promedio|m[aá]ximo|m[ií]nimo|top|mayor|menor|mejor|peor|'
+    r'muestra|dame|dime|calcula|analiza|tabla|gr[aá]fico|'
+    r'comparar|comparaci[oó]n|tendencia|crecimiento|porcentaje)\b',
+    re.IGNORECASE,
+)
+
+# Preguntas sobre qué puede hacer el sistema (meta/capacidad)
+_CAPABILITY_RE = re.compile(
+    r'\b(qu[eé]\s+puedo\s+consultar|qu[eé]\s+puedo\s+preguntar|'
+    r'qu[eé]\s+tipo\s+de|qu[eé]\s+informaci[oó]n|qu[eé]\s+datos?\s+tienes?|'
+    r'qu[eé]\s+consultas?\s+puedo|c[oó]mo\s+funciona|'
+    r'para\s+qu[eé]\s+sirv|qu[eé]\s+haces?|qu[eé]\s+sabes?|'
+    r'qu[eé]\s+puedes?\s+hacer|capacidades?|sobre\s+qu[eé]\s+puedo|'
+    r'de\s+qu[eé]\s+puedo|qu[eé]\s+temas?\s+cubres?)\b',
+    re.IGNORECASE,
+)
+
+_GREETING_WORD_RE = re.compile(
+    r'\b(hola|hi|hey|hello|buenas?|gracias|thank|bye|adi[oó]s|chao|chau|'
+    r'hasta luego|hasta pronto|c[oó]mo est[aá]s|qu[eé] tal|'
+    r'qui[eé]n eres|qu[eé] eres|qu[eé] puedes|ayuda|help)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_greeting_message(message: str) -> bool:
+    """Detecta si el mensaje es un saludo, chitchat o pregunta de capacidades sin intención analítica."""
+    stripped = message.strip()
+    normalized = stripped.lower().rstrip('?!¿¡. ')
+
+    if normalized in _GREETING_EXACT:
+        return True
+
+    if _GREETING_PREFIX_RE.match(stripped):
+        return True
+
+    # Pregunta sobre qué puede hacer el sistema (meta-pregunta)
+    if _CAPABILITY_RE.search(stripped) and not _ANALYTIC_INDICATOR_RE.search(stripped):
+        return True
+
+    # Mensaje corto sin palabras analíticas pero con palabra de saludo
+    if len(stripped) < 80 and not _ANALYTIC_INDICATOR_RE.search(stripped):
+        if _GREETING_WORD_RE.search(stripped):
+            return True
+
+    return False
+
+
+async def _get_greeting_response(message: str) -> str:
+    """Llama al LLM directamente para responder saludos sin pasar por el agente SQL."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    if not api_key:
+        return "¡Hola! Soy TIARA, tu asistente de análisis de datos de ventas. ¿En qué puedo ayudarte?"
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "max_tokens": 120,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Eres TIARA, un asistente analítico especializado en datos de ventas de AdventureWorks. "
+                                "Cuando el usuario te saluda o hace preguntas generales, responde de forma breve, "
+                                "amigable y en español. Menciona que puedes ayudar con análisis de ventas, productos, "
+                                "clientes, territorios y tendencias. Sin markdown ni bullets. Solo texto natural. Máximo 2 oraciones."
+                            ),
+                        },
+                        {"role": "user", "content": message},
+                    ],
+                },
+            )
+            return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        logger.exception("Error generando respuesta de saludo")
+        return "¡Hola! Soy TIARA, tu asistente de análisis de datos. ¿En qué puedo ayudarte hoy?"
+
+
 def _filter_and_deduplicate(hits: list) -> list:
     sorted_hits = sorted(hits, key=lambda h: h.get("distance", 999))
 
@@ -1400,6 +1507,13 @@ async def run_agent_stream_text(
 ) -> AsyncGenerator[str, None]:
 
     original_question = message
+
+    # 0. Saludos y chitchat — responde el LLM directamente, sin agente SQL
+    if not retry and _is_greeting_message(original_question):
+        logger.info("Saludo detectado — respondiendo sin agente SQL")
+        greeting_response = await _get_greeting_response(original_question)
+        yield greeting_response
+        return
 
     # En reintento forzamos SQL fresco evictando la entrada cacheada
     if retry:
