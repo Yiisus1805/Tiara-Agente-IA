@@ -91,31 +91,73 @@ _SQL_KEYWORD_GUARDS = [
 ]
 
 
-def _remove_cte_order_by(sql: str) -> str:
-    """Elimina ORDER BY dentro de CTEs sin TOP/FETCH (inválido en SQL Server)."""
+def _remove_cte_order_by(sql: str) -> tuple[str, str]:
+    """Elimina ORDER BY dentro de CTEs sin TOP/FETCH (inválido en SQL Server).
+
+    Devuelve (sql_modificado, order_by_eliminado) para que el llamador pueda
+    moverlo al SELECT final si corresponde.
+    """
+    last_removed: list[str] = []
+
     def _strip_if_no_top(m: re.Match) -> str:
         before = sql[max(0, m.start() - 600): m.start()]
 
-        # No eliminar ORDER BY que esté dentro de un OVER() aún abierto
         last_over = max(before.upper().rfind('OVER ('), before.upper().rfind('OVER('))
         if last_over >= 0:
             depth = sum(1 if c == '(' else -1 if c == ')' else 0
                         for c in before[last_over:])
             if depth > 0:
-                return m.group()  # ORDER BY pertenece a una función de ventana
+                return m.group()
 
         last_select = before.upper().rfind('SELECT')
         context = before[last_select:] if last_select >= 0 else before
         if re.search(r'\bTOP\b|\bFETCH\b', context, re.IGNORECASE):
-            return m.group()   # ORDER BY válido (tiene TOP/FETCH)
-        return ''              # ORDER BY inválido dentro de CTE
+            return m.group()
 
-    return re.sub(
+        last_removed.append(m.group().strip())
+        return ''
+
+    result = re.sub(
         r'\s+ORDER\s+BY\s+[\w\s,\.\[\]]+(?=\s*\))',
         _strip_if_no_top,
         sql,
         flags=re.IGNORECASE,
     )
+    return result, last_removed[-1] if last_removed else ""
+
+
+_FETCH_FIRST_RE = re.compile(
+    r'\bFETCH\s+FIRST\s+(\d+)\s+ROWS?\s+ONLY\b', re.IGNORECASE
+)
+
+
+def _fix_fetch_first(sql: str) -> str:
+    """Convierte FETCH FIRST N ROWS ONLY → SELECT TOP N (SQL Server no lo soporta)."""
+    m = _FETCH_FIRST_RE.search(sql)
+    if not m:
+        return sql
+
+    n = m.group(1)
+    pre_fetch = sql[:m.start()]
+
+    # El SELECT principal está después del último ')' que cierra los CTEs
+    last_close = pre_fetch.rfind(')')
+    search_from = last_close + 1 if last_close >= 0 else 0
+    outer_pos = pre_fetch[search_from:].upper().find('SELECT')
+
+    if outer_pos >= 0:
+        abs_pos = search_from + outer_pos
+        fixed = (
+            sql[:abs_pos]
+            + f'SELECT TOP {n}'
+            + sql[abs_pos + 6: m.start()]
+            + sql[m.end():]
+        )
+    else:
+        fixed = pre_fetch.rstrip() + sql[m.end():]
+
+    logger.info("SQL corregido — FETCH FIRST %s ROWS ONLY → SELECT TOP %s", n, n)
+    return fixed
 
 
 _WINDOW_REQUIRES_ORDER_BY = re.compile(
@@ -238,25 +280,34 @@ def _sanitize_sql_aliases(sql: str) -> str:
     # 2. Añadir ORDER BY faltante en funciones de ventana (LAG/LEAD/etc.)
     fixed = _fix_window_order_by(fixed)
 
-    # 2. Eliminar ORDER BY inválido dentro de CTEs
-    fixed = _remove_cte_order_by(fixed)
-    if fixed != sql:
+    # 3. Eliminar ORDER BY inválido dentro de CTEs y capturarlo para moverlo
+    fixed, removed_order_by = _remove_cte_order_by(fixed)
+    if removed_order_by:
         logger.info("SQL corregido — ORDER BY eliminado de CTE sin TOP")
+        # Si el SELECT final tiene TOP pero no ORDER BY, mover allí el ORDER BY capturado
+        has_top_outer = bool(re.search(r'\bSELECT\s+TOP\b', fixed, re.IGNORECASE))
+        has_order_outer = bool(re.search(r'\bORDER\s+BY\b', fixed, re.IGNORECASE))
+        if has_top_outer and not has_order_outer:
+            fixed = fixed.rstrip().rstrip(';').rstrip() + '\n' + removed_order_by + ';'
+            logger.info("SQL corregido — ORDER BY movido al SELECT final")
 
-    # 3. Añadir JOIN a DimDate cuando falta en un CTE que lo referencia
+    # 4. Convertir FETCH FIRST N ROWS ONLY → SELECT TOP N
+    fixed = _fix_fetch_first(fixed)
+
+    # 5. Añadir JOIN a DimDate cuando falta en un CTE que lo referencia
     fixed = _fix_missing_dimdate_join(fixed)
 
-    # 2. Proteger contextos donde las palabras son keywords válidos
+    # 6. Proteger contextos donde las palabras son keywords válidos
     guarded = fixed
     for guard_pattern, placeholder in _SQL_KEYWORD_GUARDS:
         guarded = re.sub(guard_pattern, placeholder, guarded, flags=re.IGNORECASE)
 
-    # 3. Reemplazar alias problemáticos
+    # 7. Reemplazar alias problemáticos
     sanitized = guarded
     for pattern, replacement in _RESERVED_ALIAS_REPLACEMENTS.items():
         sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
 
-    # 4. Restaurar keywords protegidos
+    # 8. Restaurar keywords protegidos
     sanitized = sanitized.replace('FETCH __NEXT__', 'FETCH NEXT')
     sanitized = sanitized.replace('__CURRENT_', 'CURRENT_')
     return sanitized
@@ -1148,7 +1199,9 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "   Si necesitas múltiples datos, combínalos en UNA sola query con CTEs o subconsultas.\n"
         "   Si la query falla NO reintentes — reporta el error exacto al usuario.\n"
         "   Para filtrar por año en DimDate usa SIEMPRE: JOIN dbo.DimDate DD ON FIS.OrderDateKey = DD.DateKey — luego WHERE DD.CalendarYear IN (...)\n"
-        "3. Para limitar filas usa TOP N al inicio: SELECT TOP N ... (nunca al final).\n"
+        "3. Para limitar filas usa TOP N al inicio del SELECT principal: SELECT TOP N ...\n"
+        "   ORDER BY va SIEMPRE en el SELECT final, NUNCA dentro de una CTE (SQL Server devuelve error).\n"
+        "   NUNCA uses FETCH FIRST N ROWS ONLY — SQL Server solo soporta SELECT TOP N.\n"
         "4. No menciones CSV, archivos, ni muestres el SQL generado.\n"
         "5. No uses **, ##, ni markdown en tus respuestas.\n"
         "6. NUNCA digas que el esquema no tiene información si hay tablas Fact con métricas.\n\n"
