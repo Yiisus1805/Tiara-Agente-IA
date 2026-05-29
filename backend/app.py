@@ -115,6 +115,7 @@ async def tiara_chat_stream(request: Request):
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
             },
         )
 
