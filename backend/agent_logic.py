@@ -1173,104 +1173,77 @@ def _is_discovery_question(message: str) -> bool:
     return any(kw in message.lower() for kw in DISCOVERY_KEYWORDS)
 
 
-# ── DETECCIÓN DE SALUDOS ───────────────────────────────────────────────────────
+# ── CLASIFICADOR DE INTENCIÓN ─────────────────────────────────────────────────
+# Determina si el mensaje requiere SQL o es conversación general.
+# Usa el LLM con max_tokens=5 para ser robusto ante cualquier formulación.
 
-_GREETING_EXACT = frozenset({
-    "hola", "hi", "hey", "hello", "buenas", "saludos",
-    "buenos días", "buenos dias", "buenas tardes", "buenas noches",
-    "gracias", "muchas gracias", "thank you", "thanks",
-    "adiós", "adios", "hasta luego", "bye", "chao", "chau",
-    "hasta pronto", "nos vemos", "ok", "okay", "bien",
-    "¿cómo estás?", "como estas", "cómo estás", "¿como estas?",
-    "¿qué tal?", "que tal", "¿qué hay?", "que hay",
-    "¿quién eres?", "quien eres", "¿qué eres?", "que eres",
-    "¿qué puedes hacer?", "que puedes hacer",
-    "¿para qué sirves?", "para que sirves",
-    "¿me puedes ayudar?", "me puedes ayudar", "ayuda", "help",
-})
+async def _classify_intent(message: str) -> str:
+    """Retorna 'SQL' si el mensaje requiere una consulta de datos, 'CHAT' en caso contrario."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    if not api_key:
+        return "SQL"
 
-_GREETING_PREFIX_RE = re.compile(
-    r'^(hola|hi|hey|hello|buenas?|buenos\s+d[ií]as?|buenas?\s+tardes?|buenas?\s+noches?)[\s!¡.,]*$',
-    re.IGNORECASE,
-)
-
-_ANALYTIC_INDICATOR_RE = re.compile(
-    r'\b(cu[aá]nto|cu[aá]l|cu[aá]ntos|cu[aá]les|cu[aá]ndo|d[oó]nde|'
-    r'ventas?|producto|cliente|empleado|a[nñ]o|mes|trimestre|regi[oó]n|'
-    r'total|suma|promedio|m[aá]ximo|m[ií]nimo|top|mayor|menor|mejor|peor|'
-    r'muestra|dame|dime|calcula|analiza|tabla|gr[aá]fico|'
-    r'comparar|comparaci[oó]n|tendencia|crecimiento|porcentaje)\b',
-    re.IGNORECASE,
-)
-
-# Preguntas sobre qué puede hacer el sistema (meta/capacidad)
-_CAPABILITY_RE = re.compile(
-    r'\b(qu[eé]\s+puedo\s+consultar|qu[eé]\s+puedo\s+preguntar|'
-    r'qu[eé]\s+tipo\s+de|qu[eé]\s+informaci[oó]n|qu[eé]\s+datos?\s+tienes?|'
-    r'qu[eé]\s+consultas?\s+puedo|c[oó]mo\s+funciona|'
-    r'para\s+qu[eé]\s+sirv|qu[eé]\s+haces?|qu[eé]\s+sabes?|'
-    r'qu[eé]\s+puedes?\s+(hacer|responder|analizar|predecir|calcular|mostrar|decir|consultar)|'
-    r'puedes?\s+(responder|analizar|predecir|hacer|ayudar|calcular|mostrar|decirme|consultar)|'
-    r'capacidades?|sobre\s+qu[eé]\s+puedo|de\s+qu[eé]\s+puedo|'
-    r'qu[eé]\s+temas?\s+cubres?|preguntas?\s+predictivas?|'
-    r'tienes?\s+acceso|tienes?\s+informaci[oó]n\s+sobre|tienes?\s+datos?\s+(de|sobre))\b',
-    re.IGNORECASE,
-)
-
-_GREETING_WORD_RE = re.compile(
-    r'\b(hola|hi|hey|hello|buenas?|gracias|thank|bye|adi[oó]s|chao|chau|'
-    r'hasta luego|hasta pronto|c[oó]mo est[aá]s|qu[eé] tal|'
-    r'qui[eé]n eres|qu[eé] eres|qu[eé] puedes|ayuda|help)\b',
-    re.IGNORECASE,
-)
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "max_tokens": 5,
+                    "temperature": 0,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Clasifica el mensaje del usuario en UNA de estas dos categorías:\n"
+                                "SQL — el usuario quiere datos, métricas, reportes, análisis de ventas, "
+                                "productos, clientes, empleados, territorios, fechas, rankings, gráficos, "
+                                "comparaciones, tendencias o cualquier consulta sobre la base de datos.\n"
+                                "CHAT — el usuario saluda, agradece, se despide, pregunta qué eres, "
+                                "qué puedes hacer, cómo funcionas, si puedes responder algo, "
+                                "o hace cualquier pregunta general que NO requiere consultar datos.\n"
+                                "Responde ÚNICAMENTE con la palabra SQL o CHAT."
+                            ),
+                        },
+                        {"role": "user", "content": message},
+                    ],
+                },
+            )
+            result = resp.json()["choices"][0]["message"]["content"].strip().upper()
+            intent = "SQL" if "SQL" in result else "CHAT"
+            logger.info("Clasificación de intención: '%s' → %s", message[:60], intent)
+            return intent
+    except Exception:
+        logger.exception("Error clasificando intención — fallback a SQL")
+        return "SQL"
 
 
-def _is_greeting_message(message: str) -> bool:
-    """Detecta si el mensaje es un saludo, chitchat o pregunta de capacidades sin intención analítica."""
-    stripped = message.strip()
-    normalized = stripped.lower().rstrip('?!¿¡. ')
-
-    if normalized in _GREETING_EXACT:
-        return True
-
-    if _GREETING_PREFIX_RE.match(stripped):
-        return True
-
-    # Pregunta sobre qué puede hacer el sistema (meta-pregunta)
-    if _CAPABILITY_RE.search(stripped) and not _ANALYTIC_INDICATOR_RE.search(stripped):
-        return True
-
-    # Mensaje corto sin palabras analíticas pero con palabra de saludo
-    if len(stripped) < 80 and not _ANALYTIC_INDICATOR_RE.search(stripped):
-        if _GREETING_WORD_RE.search(stripped):
-            return True
-
-    return False
-
-
-async def _get_greeting_response(message: str) -> str:
-    """Llama al LLM directamente para responder saludos sin pasar por el agente SQL."""
+async def _get_chat_response(message: str) -> str:
+    """Responde directamente con el LLM sin invocar el agente SQL."""
     api_key = os.getenv("OPENAI_API_KEY")
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     if not api_key:
         return "¡Hola! Soy TIARA, tu asistente de análisis de datos de ventas. ¿En qué puedo ayudarte?"
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
                     "model": model,
-                    "max_tokens": 120,
+                    "max_tokens": 200,
                     "messages": [
                         {
                             "role": "system",
                             "content": (
                                 "Eres TIARA, un asistente analítico especializado en datos de ventas de AdventureWorks. "
-                                "Cuando el usuario te saluda o hace preguntas generales, responde de forma breve, "
-                                "amigable y en español. Menciona que puedes ayudar con análisis de ventas, productos, "
-                                "clientes, territorios y tendencias. Sin markdown ni bullets. Solo texto natural. Máximo 2 oraciones."
+                                "Puedes responder preguntas sobre ventas por región, producto, cliente, empleado, "
+                                "canal (internet o revendedor), territorio, tendencias temporales y rankings. "
+                                "NO tienes acceso a datos externos ni puedes hacer predicciones fuera de los datos históricos. "
+                                "Responde de forma breve, amigable y en español. Sin markdown ni bullets. Solo texto natural."
                             ),
                         },
                         {"role": "user", "content": message},
@@ -1279,7 +1252,7 @@ async def _get_greeting_response(message: str) -> str:
             )
             return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception:
-        logger.exception("Error generando respuesta de saludo")
+        logger.exception("Error generando respuesta conversacional")
         return "¡Hola! Soy TIARA, tu asistente de análisis de datos. ¿En qué puedo ayudarte hoy?"
 
 
@@ -1511,12 +1484,13 @@ async def run_agent_stream_text(
 
     original_question = message
 
-    # 0. Saludos y chitchat — responde el LLM directamente, sin agente SQL
-    if not retry and _is_greeting_message(original_question):
-        logger.info("Saludo detectado — respondiendo sin agente SQL")
-        greeting_response = await _get_greeting_response(original_question)
-        yield greeting_response
-        return
+    # 0. Clasificar intención — si no es una consulta de datos, responder sin agente SQL
+    if not retry:
+        intent = await _classify_intent(original_question)
+        if intent == "CHAT":
+            chat_response = await _get_chat_response(original_question)
+            yield chat_response
+            return
 
     # En reintento forzamos SQL fresco evictando la entrada cacheada
     if retry:
