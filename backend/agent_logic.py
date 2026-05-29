@@ -1586,9 +1586,8 @@ def build_agent() -> Agent:
         except Exception:
             logger.exception("Error en auto-ingest del esquema — el agente continuará sin RAG de esquema")
 
-    # Siempre re-indexar join paths al arrancar (upsert idempotente —
-    # garantiza que Render u otros entornos con ChromaDB pre-existente
-    # tengan las relaciones FK aunque el store no sea nuevo)
+    # Indexar join paths solo si el número en el store difiere del esperado
+    # (evita llamadas a la API de embeddings en cada recarga en desarrollo)
     try:
         from .ingest_schema import (
             get_connection, fetch_all_fk_relations, build_join_path_docs,
@@ -1597,17 +1596,30 @@ def build_agent() -> Agent:
         cursor = conn.cursor()
         all_fks = fetch_all_fk_relations(cursor)
         docs = build_join_path_docs(all_fks)
-        for d in docs:
-            SCHEMA_STORE.upsert(
-                ids=[d["id"]],
-                documents=[d["doc"]],
-                metadatas=[d["meta"]],
-            )
         conn.close()
-        logger.info("Join paths actualizados al arrancar: %d docs — total store: %d",
-                    len(docs), SCHEMA_STORE.count())
+
+        try:
+            existing = SCHEMA_STORE.col.get(
+                where={"type": {"$in": ["join_path", "join_chain"]}},
+                limit=len(docs) + 1,
+            )
+            existing_count = len(existing.get("ids") or [])
+        except Exception:
+            existing_count = 0
+
+        if existing_count < len(docs):
+            for d in docs:
+                SCHEMA_STORE.upsert(
+                    ids=[d["id"]],
+                    documents=[d["doc"]],
+                    metadatas=[d["meta"]],
+                )
+            logger.info("Join paths indexados: %d nuevos — total store: %d",
+                        len(docs), SCHEMA_STORE.count())
+        else:
+            logger.info("Join paths ya presentes (%d) — sin re-indexar", existing_count)
     except Exception:
-        logger.exception("Error re-indexando join paths al arrancar")
+        logger.exception("Error verificando join paths al arrancar")
 
     return Agent(
         llm_service=llm,
