@@ -1585,29 +1585,29 @@ def build_agent() -> Agent:
             logger.info("Auto-ingest completado: %d entradas", SCHEMA_STORE.count())
         except Exception:
             logger.exception("Error en auto-ingest del esquema — el agente continuará sin RAG de esquema")
-    else:
-        # Verificar que los join paths estén indexados; si no, ingestarlos
-        try:
-            jp_check = SCHEMA_STORE.col.get(where={"type": "join_path"}, limit=1)
-            if not jp_check.get("ids"):
-                logger.info("Join paths no encontrados en schema store — indexando relaciones FK")
-                from .ingest_schema import (
-                    get_connection, fetch_all_fk_relations, build_join_path_docs,
-                )
-                conn = get_connection()
-                cursor = conn.cursor()
-                all_fks = fetch_all_fk_relations(cursor)
-                docs = build_join_path_docs(all_fks)
-                for d in docs:
-                    SCHEMA_STORE.upsert(
-                        ids=[d["id"]],
-                        documents=[d["doc"]],
-                        metadatas=[d["meta"]],
-                    )
-                conn.close()
-                logger.info("Join paths indexados: %d — schema store total: %d", len(docs), SCHEMA_STORE.count())
-        except Exception:
-            logger.exception("Error verificando/indexando join paths")
+
+    # Siempre re-indexar join paths al arrancar (upsert idempotente —
+    # garantiza que Render u otros entornos con ChromaDB pre-existente
+    # tengan las relaciones FK aunque el store no sea nuevo)
+    try:
+        from .ingest_schema import (
+            get_connection, fetch_all_fk_relations, build_join_path_docs,
+        )
+        conn = get_connection()
+        cursor = conn.cursor()
+        all_fks = fetch_all_fk_relations(cursor)
+        docs = build_join_path_docs(all_fks)
+        for d in docs:
+            SCHEMA_STORE.upsert(
+                ids=[d["id"]],
+                documents=[d["doc"]],
+                metadatas=[d["meta"]],
+            )
+        conn.close()
+        logger.info("Join paths actualizados al arrancar: %d docs — total store: %d",
+                    len(docs), SCHEMA_STORE.count())
+    except Exception:
+        logger.exception("Error re-indexando join paths al arrancar")
 
     return Agent(
         llm_service=llm,
