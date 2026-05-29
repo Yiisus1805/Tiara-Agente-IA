@@ -379,6 +379,14 @@ async def _get_corrected_sql(question: str, bad_sql: str, problem: str) -> Optio
         f"SQL generado con error:\n{bad_sql}\n\n"
         f"Problema detectado: {problem}\n\n"
         f"Esquema disponible:\n{schema_context}\n\n"
+        "REGLAS CRÍTICAS:\n"
+        "- Si la pregunta menciona un nombre de VENDEDOR/EMPLEADO (quien hace la venta): "
+        "usa DimEmployee DE + FactResellerSales FRS ON FRS.EmployeeKey = DE.EmployeeKey. "
+        "NUNCA busques un vendedor en DimCustomer.\n"
+        "- Si la pregunta menciona un nombre de CLIENTE (quien compra): "
+        "usa DimCustomer DC + FactInternetSales FIS ON FIS.CustomerKey = DC.CustomerKey. "
+        "NUNCA busques un cliente en DimEmployee.\n"
+        "- NUNCA mezcles DimEmployee con DimCustomer en la misma consulta para una persona.\n\n"
         "Escribe ÚNICAMENTE el SQL corregido, sin explicaciones ni bloques markdown."
     )
 
@@ -1111,7 +1119,23 @@ def _is_discovery_question(message: str) -> bool:
 
 def _filter_and_deduplicate(hits: list) -> list:
     sorted_hits = sorted(hits, key=lambda h: h.get("distance", 999))
-    return sorted_hits[:RAG_K_FINAL]
+
+    # Limitar join_path/join_chain a máximo 3 para que los docs de esquema también aparezcan
+    result: list = []
+    join_doc_count = 0
+    MAX_JOIN_DOCS = 3
+    for h in sorted_hits:
+        if len(result) >= RAG_K_FINAL:
+            break
+        meta_type = h.get("meta", {}).get("type", "")
+        if meta_type in ("join_path", "join_chain"):
+            if join_doc_count < MAX_JOIN_DOCS:
+                result.append(h)
+                join_doc_count += 1
+        else:
+            result.append(h)
+
+    return result
 
 
 def _build_schema_prompt(message: str, hits: list) -> str:
