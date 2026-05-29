@@ -1397,6 +1397,7 @@ async def run_agent_stream_text(
         # El stream produjo output vacío pero el SQL fue ejecutado — fallback completo
         logger.warning("Stream vacío con SQL capturado — activando fallback de renderizado")
         df = None
+        last_sql_error: str = ""
         for sql_attempt in reversed(captured_sql):
             try:
                 tool_args = RunSqlToolArgs(sql=sql_attempt)
@@ -1404,9 +1405,28 @@ async def run_agent_stream_text(
                 logger.info("Fallback SQL exitoso (intento con SQL más reciente)")
                 break
             except Exception as e:
+                last_sql_error = str(e)
                 logger.warning("Fallback SQL falló, probando anterior: %s", e)
+
+        # Si todos los intentos fallaron con error SQL, pedir corrección al LLM
+        if df is None and last_sql_error and captured_sql:
+            logger.warning("SQL error — solicitando corrección LLM: %s", last_sql_error[:200])
+            corrected = await _get_corrected_sql(
+                original_question,
+                captured_sql[-1],
+                f"Error SQL de SQL Server: {last_sql_error[:400]}",
+            )
+            if corrected:
+                try:
+                    df = await SQL_RUNNER.run_sql(RunSqlToolArgs(sql=corrected), None)
+                    captured_sql[-1] = corrected
+                    _evict_sql_cache(original_question)
+                    logger.info("Corrección LLM exitosa tras error SQL (%d filas)", len(df))
+                except Exception as e:
+                    logger.warning("SQL corregido también falló: %s", e)
+
         if df is None:
-            yield "Ocurrió un error al procesar los resultados."
+            yield ERROR_RETRY_SENTINEL + "Ocurrió un error al procesar los resultados."
             return
         try:
             if df.empty:
@@ -1456,7 +1476,7 @@ async def run_agent_stream_text(
                 yield msg
         except Exception:
             logger.exception("Error en fallback de renderizado")
-            yield "Ocurrió un error al procesar los resultados."
+            yield ERROR_RETRY_SENTINEL + "Ocurrió un error al procesar los resultados."
     else:
         combined_pre = " ".join(pre_table_buffer)
         if pre_table_buffer and _is_vague_analysis(combined_pre) and captured_sql and SQL_RUNNER:
