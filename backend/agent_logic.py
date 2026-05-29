@@ -34,6 +34,10 @@ SCHEMA_STORE: SchemaVectorStore | None = None
 SQL_RUNNER: SqlServerRunner | None = None
 SQL_CACHE = None
 
+# FK col set — cargado al arrancar desde la BD real, sin hardcoding
+# Contiene (table_name_lower, col_name_lower) para todos los lados FK y PK
+_FK_COL_SET: set[tuple[str, str]] = set()
+
 # Contexto por-request: aislamiento total entre requests concurrentes
 _ctx_sql_callback: ContextVar = ContextVar("_tiara_sql_cb", default=None)
 _ctx_sql_question: ContextVar = ContextVar("_tiara_sql_q", default="")
@@ -265,6 +269,25 @@ _JOIN_ON_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Para validación FK-aware: extrae alias→tabla y condiciones JOIN ON completas
+_TABLE_ALIAS_RE = re.compile(
+    r'\b(?:FROM|JOIN)\s+(?:\w+\.)?(\w+)\s+(\w+)\b',
+    re.IGNORECASE,
+)
+_JOIN_ON_FULL_RE = re.compile(
+    r'\bON\s+(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)',
+    re.IGNORECASE,
+)
+_CTE_DEF_RE = re.compile(r'\b(\w+)\s+AS\s*\(', re.IGNORECASE)
+_SQL_KW_SET = frozenset({
+    'on', 'where', 'set', 'from', 'join', 'left', 'right', 'inner',
+    'outer', 'full', 'cross', 'as', 'and', 'or', 'not', 'in', 'is',
+    'null', 'like', 'between', 'exists', 'all', 'any', 'select',
+    'order', 'group', 'by', 'having', 'union', 'with', 'insert',
+    'update', 'delete', 'into', 'values', 'case', 'when', 'then',
+    'else', 'end', 'top', 'distinct', 'over', 'partition',
+})
+
 
 def _keys_compatible(k1: str, k2: str) -> bool:
     """Dos *Key columns son compatibles si uno es sufijo del otro (ej. DateKey / OrderDateKey)."""
@@ -289,6 +312,49 @@ def _validate_sql_joins(sql: str) -> list[str]:
             errors.append(
                 "SQL usa DD. (alias de DimDate) pero falta JOIN dbo.DimDate DD ON FIS.OrderDateKey = DD.DateKey"
             )
+
+    # Validación FK-aware: detecta columnas *Key que no existen en la tabla referenciada
+    if _FK_COL_SET:
+        # Nombres de CTEs definidos en este SQL (para no validarlos como tablas reales)
+        cte_names = {m.group(1).lower() for m in _CTE_DEF_RE.finditer(sql)}
+
+        # Mapeo alias → nombre de tabla real
+        alias_to_table: dict[str, str] = {}
+        for m in _TABLE_ALIAS_RE.finditer(sql):
+            table_name, alias = m.group(1), m.group(2)
+            if alias.lower() not in _SQL_KW_SET:
+                alias_to_table[alias.lower()] = table_name.lower()
+
+        # Revisar cada JOIN ON alias1.col1 = alias2.col2
+        for m in _JOIN_ON_FULL_RE.finditer(sql):
+            alias1, col1, alias2, col2 = m.group(1), m.group(2), m.group(3), m.group(4)
+            for alias, col in [(alias1, col1), (alias2, col2)]:
+                if not col.lower().endswith('key'):
+                    continue  # solo validar columnas *Key
+
+                if alias.lower() in cte_names:
+                    continue  # el alias es un CTE, no una tabla real
+
+                table = alias_to_table.get(alias.lower())
+                if not table:
+                    continue  # alias no reconocido (probablemente CTE sin alias explícito)
+
+                if table in cte_names:
+                    continue  # el alias referencia a un CTE
+
+                if (table, col.lower()) not in _FK_COL_SET:
+                    # Buscar en qué tablas sí existe esa columna
+                    tables_with_col = sorted(
+                        t for (t, c) in _FK_COL_SET if c == col.lower() and t != table
+                    )
+                    hint = (
+                        f" — la columna sí existe en: {', '.join(tables_with_col)}"
+                        if tables_with_col else ""
+                    )
+                    errors.append(
+                        f"La columna {col} no existe en {table}{hint}. "
+                        f"Usa la tabla correcta para este JOIN."
+                    )
 
     return errors
 
@@ -1610,6 +1676,14 @@ def build_agent() -> Agent:
         all_fks = fetch_all_fk_relations(cursor)
         docs = build_join_path_docs(all_fks)
         conn.close()
+
+        # Cargar mapa FK en memoria para validación dinámica de JOINs en runtime
+        global _FK_COL_SET
+        _FK_COL_SET.clear()
+        for _, p_table, p_col, _, r_table, r_col in all_fks:
+            _FK_COL_SET.add((p_table.lower(), p_col.lower()))
+            _FK_COL_SET.add((r_table.lower(), r_col.lower()))
+        logger.info("FK col set cargado: %d pares (tabla, columna) únicos", len(_FK_COL_SET))
 
         try:
             existing = SCHEMA_STORE.col.get(

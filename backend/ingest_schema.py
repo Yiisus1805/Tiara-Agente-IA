@@ -32,11 +32,14 @@ SPANISH_ALIASES = {
     "FactResellerSales": (
         "ventas reseller revendedor distribuidor canal indirecto canal distribucion "
         "ventas totales total de ventas ingresos totales cuanto se vendio en total "
-        "SalesAmount OrderQuantity TotalProductCost UnitPrice "
+        "SalesAmount OrderQuantity TotalProductCost UnitPrice EmployeeKey ResellerKey "
         "ingresos monto total facturación ventas por distribuidor "
         "tendencia de ventas ventas por año crecimiento de ventas "
         "cuanto vendio el reseller ranking distribuidores "
-        "ventas a traves de socios comerciales"
+        "ventas a traves de socios comerciales "
+        "vendedores empleados representantes de ventas fuerza de ventas "
+        "quien vendio mas mejor vendedor desempeno del vendedor ventas por empleado "
+        "FactResellerSales tiene EmployeeKey para unirse a DimEmployee"
     ),
     "FactSalesQuota": (
         "cuota presupuesto objetivo meta target SalesAmountQuota CalendarYear "
