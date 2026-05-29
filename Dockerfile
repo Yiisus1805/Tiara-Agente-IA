@@ -23,4 +23,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD gunicorn backend.app:app -w 1 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+CMD gunicorn backend.app:app -w 1 -k uvicorn.workers.UvicornWorker --timeout 120 --keep-alive 5 --bind 0.0.0.0:$PORT
