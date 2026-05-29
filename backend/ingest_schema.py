@@ -453,6 +453,107 @@ Uso:
 
     return doc
 
+# ALL FOREIGN KEYS (single query for join path indexing)
+
+def fetch_all_fk_relations(cursor):
+    cursor.execute("""
+    SELECT
+        ps.name, pt.name, pc.name,
+        rs.name, rt.name, rc.name
+    FROM sys.foreign_key_columns fk
+    JOIN sys.tables  pt ON fk.parent_object_id     = pt.object_id
+    JOIN sys.columns pc ON fk.parent_object_id     = pc.object_id
+                       AND fk.parent_column_id     = pc.column_id
+    JOIN sys.tables  rt ON fk.referenced_object_id = rt.object_id
+    JOIN sys.columns rc ON fk.referenced_object_id = rc.object_id
+                       AND fk.referenced_column_id = rc.column_id
+    JOIN sys.schemas ps ON pt.schema_id = ps.schema_id
+    JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
+    ORDER BY pt.name, pc.name
+    """)
+    return cursor.fetchall()
+
+
+# JOIN PATH DOCUMENTS
+
+def build_join_path_docs(all_fks):
+    """Genera documentos de join paths directos y cadenas de 2 saltos."""
+    docs = []
+
+    # Índice: from_table -> [(from_col, to_schema, to_table, to_col)]
+    fk_index: dict = {}
+    for p_schema, p_table, p_col, r_schema, r_table, r_col in all_fks:
+        fk_index.setdefault(p_table, []).append((p_col, r_schema, r_table, r_col))
+
+    # Paths directos (1 salto)
+    for p_schema, p_table, p_col, r_schema, r_table, r_col in all_fks:
+        doc_id = f"rel:{p_table}.{p_col}:{r_table}.{r_col}"
+        p_ctx = SPANISH_ALIASES.get(p_table, "")[:200]
+        r_ctx = SPANISH_ALIASES.get(r_table, "")[:200]
+        doc = (
+            f"JOIN: {p_schema}.{p_table}.{p_col} → {r_schema}.{r_table}.{r_col}\n"
+            f"SQL: JOIN {r_schema}.{r_table} ON {p_table}.{p_col} = {r_table}.{r_col}\n"
+            f"Contexto {p_table}: {p_ctx}\n"
+            f"Contexto {r_table}: {r_ctx}"
+        )
+        docs.append({
+            "id": doc_id,
+            "doc": doc,
+            "meta": {"type": "join_path", "from_table": p_table, "to_table": r_table},
+        })
+
+    # Cadenas de 2 saltos (A → B → C)
+    for p_schema, p_table, p_col, r_schema, r_table, r_col in all_fks:
+        for r2_col, r2_schema, r2_table, r2_rcol in fk_index.get(r_table, []):
+            if r2_table == p_table:
+                continue  # evitar ciclos
+            doc_id = f"chain:{p_table}.{p_col}:{r_table}.{r2_col}:{r2_table}"
+            p_ctx  = SPANISH_ALIASES.get(p_table,  "")[:150]
+            r_ctx  = SPANISH_ALIASES.get(r_table,  "")[:150]
+            r2_ctx = SPANISH_ALIASES.get(r2_table, "")[:150]
+            doc = (
+                f"JOIN CHAIN: {p_table} → {r_table} → {r2_table}\n"
+                f"Para acceder a {r2_table} desde {p_table}:\n"
+                f"  JOIN {r_schema}.{r_table} ON {p_table}.{p_col} = {r_table}.{r_col}\n"
+                f"  JOIN {r2_schema}.{r2_table} ON {r_table}.{r2_col} = {r2_table}.{r2_rcol}\n"
+                f"Contexto {p_table}: {p_ctx}\n"
+                f"Contexto {r_table}: {r_ctx}\n"
+                f"Contexto {r2_table}: {r2_ctx}"
+            )
+            docs.append({
+                "id": doc_id,
+                "doc": doc,
+                "meta": {
+                    "type": "join_chain",
+                    "from_table": p_table,
+                    "via_table": r_table,
+                    "to_table": r2_table,
+                },
+            })
+
+    return docs
+
+
+def ingest_join_paths(target_store, cursor):
+    """Indexa relaciones FK como documentos independientes en el schema store."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    all_fks = fetch_all_fk_relations(cursor)
+    docs = build_join_path_docs(all_fks)
+
+    for d in docs:
+        target_store.upsert(
+            ids=[d["id"]],
+            documents=[d["doc"]],
+            metadatas=[d["meta"]],
+        )
+
+    logger.info("Join paths indexados: %d", len(docs))
+    print(f"Join paths indexados: {len(docs)}")
+    return len(docs)
+
+
 # INGEST
 
 def ingest(target_store=None):
@@ -482,13 +583,7 @@ def ingest(target_store=None):
         pks = fetch_primary_keys(cursor, schema, table)
         relations = fetch_fk_relations(cursor, schema, table)
 
-        doc = build_schema_doc(
-            schema,
-            table,
-            columns,
-            pks,
-            relations,
-        )
+        doc = build_schema_doc(schema, table, columns, pks, relations)
 
         target_store.upsert(
             ids=[f"{schema}.{table}"],
@@ -502,6 +597,12 @@ def ingest(target_store=None):
 
     logger.info("Total tablas indexadas: %d", count)
     print(f"\nTotal tablas indexadas: {count}")
+
+    # Ingestar join paths como documentos independientes
+    print("\nIndexando join paths y cadenas FK...\n")
+    ingest_join_paths(target_store, cursor)
+
+    conn.close()
 
 # MAIN
 

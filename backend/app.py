@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from vanna.core.user import RequestContext
 
-from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL
+from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL, ERROR_RETRY_SENTINEL
 
 
 agent = build_agent()
@@ -74,6 +74,7 @@ async def tiara_chat_stream(request: Request):
         body = await request.json()
         question = (body.get("question") or "").strip()
         conversation_id = body.get("conversation_id")
+        is_retry = bool(body.get("retry", False))
 
         if not question:
             return JSONResponse({"error": "No question provided"}, status_code=400)
@@ -89,8 +90,12 @@ async def tiara_chat_stream(request: Request):
                     request_context=ctx,
                     message=question,
                     conversation_id=conversation_id,
+                    retry=is_retry,
                 ):
-                    if chunk.startswith(CHART_SENTINEL):
+                    if chunk.startswith(ERROR_RETRY_SENTINEL):
+                        msg = chunk[len(ERROR_RETRY_SENTINEL):]
+                        yield f"data: {json.dumps({'type': 'error_retry', 'message': msg})}\n\n"
+                    elif chunk.startswith(CHART_SENTINEL):
                         chart_data = json.loads(chunk[len(CHART_SENTINEL):])
                         yield f"data: {json.dumps({'type': 'chart', 'data': chart_data})}\n\n"
                     elif '<table' in chunk:
@@ -101,7 +106,7 @@ async def tiara_chat_stream(request: Request):
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
             except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'error_type': type(e).__name__})}\n\n"
+                yield f"data: {json.dumps({'type': 'error_retry', 'message': 'Ocurrió un error inesperado.'})}\n\n"
                 traceback.print_exc()
 
         return StreamingResponse(

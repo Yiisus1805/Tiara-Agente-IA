@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import uuid
 import re
+from contextvars import ContextVar
 from decimal import Decimal
 from typing import Any, Optional, AsyncGenerator
 
@@ -31,13 +33,21 @@ logger = logging.getLogger(__name__)
 SCHEMA_STORE: SchemaVectorStore | None = None
 SQL_RUNNER: SqlServerRunner | None = None
 SQL_CACHE = None
-TRACKING_TOOL: "TrackingSqlTool | None" = None
 
-RAG_K_FETCH = 10
-RAG_K_FINAL = 6
+# Contexto por-request: aislamiento total entre requests concurrentes
+_ctx_sql_callback: ContextVar = ContextVar("_tiara_sql_cb", default=None)
+_ctx_sql_question: ContextVar = ContextVar("_tiara_sql_q", default="")
+_ctx_sql_inflight: ContextVar = ContextVar("_tiara_sql_inflight", default=None)
+
+RAG_K_FETCH = 15
+RAG_K_FINAL = 8
 SQL_CACHE_THRESHOLD = 0.97
 MAX_ROWS_LIMIT = 500
 MAX_RESPONSE_CACHE_LEN = 100_000
+
+CHART_SENTINEL = "\x00CHART\x00"
+ERROR_RETRY_SENTINEL = "\x00ERROR_RETRY\x00"
+AGENT_STEP_TIMEOUT = float(os.getenv("AGENT_STEP_TIMEOUT", "90"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -305,18 +315,10 @@ async def _get_corrected_sql(question: str, bad_sql: str, problem: str) -> Optio
 
 
 class TrackingSqlTool(RunSqlTool):
-    def __init__(self, sql_runner, on_sql_executed=None):
+    """Instancia única compartida; el estado por-request vive en ContextVars."""
+
+    def __init__(self, sql_runner):
         super().__init__(sql_runner=sql_runner, file_system=NullFileSystem())
-        self._on_sql_executed = on_sql_executed or (lambda sql: None)
-        self._in_flight: set[str] = set()
-        self._current_question: str = ""
-
-    def set_callback(self, callback):
-        self._on_sql_executed = callback
-        self._in_flight = set()
-
-    def set_question(self, question: str):
-        self._current_question = question
 
     async def execute(self, context, args):
         sql = getattr(args, "sql", None)
@@ -328,27 +330,35 @@ class TrackingSqlTool(RunSqlTool):
                 sql = sanitized
 
             join_errors = _validate_sql_joins(sql)
-            if join_errors and self._current_question:
+            current_question = _ctx_sql_question.get()
+            if join_errors and current_question:
                 problem = "; ".join(join_errors)
                 logger.warning("JOIN inválido detectado: %s — solicitando corrección al LLM", problem)
-                corrected = await _get_corrected_sql(self._current_question, sql, problem)
+                corrected = await _get_corrected_sql(current_question, sql, problem)
                 if corrected and corrected != sql:
                     logger.info("SQL corregido por LLM antes de ejecutar")
                     args = RunSqlToolArgs(sql=corrected)
                     sql = corrected
 
         sql_key = (sql or "").strip()
-        if sql_key and sql_key in self._in_flight:
+        in_flight: set[str] | None = _ctx_sql_inflight.get()
+        if in_flight is None:
+            in_flight = set()
+            _ctx_sql_inflight.set(in_flight)
+
+        if sql_key and sql_key in in_flight:
             logger.warning("TrackingSqlTool — ejecución duplicada bloqueada")
             return None
         if sql_key:
-            self._in_flight.add(sql_key)
+            in_flight.add(sql_key)
 
         logger.info("TrackingSqlTool.execute() — SQL: %s", sql)
         result = await super().execute(context, args)
         if sql:
             try:
-                self._on_sql_executed(sql)
+                cb = _ctx_sql_callback.get()
+                if cb is not None:
+                    cb(sql)
             except Exception:
                 logger.exception("Error en TrackingSqlTool callback")
         return result
@@ -630,8 +640,8 @@ _PERCENT_KEYWORDS = {
 
 
 def _is_percent_col(col: str) -> bool:
-    c = col.lower()
-    return any(kw in c for kw in _PERCENT_KEYWORDS)
+    words = set(re.sub(r'([A-Z])', r' \1', col).lower().split())
+    return bool(words & _PERCENT_KEYWORDS)
 
 
 def _format_cell(v: Any, col: str = "") -> str:
@@ -660,7 +670,6 @@ def _format_cell(v: Any, col: str = "") -> str:
 
 # ── GRÁFICOS (ECharts) ──────────────────────────────────────────────────────
 
-CHART_SENTINEL = "\x00CHART\x00"
 
 _CHART_KEYWORDS = {
     "gráfico", "grafico", "gráfica", "grafica", "chart", "plot",
@@ -1132,29 +1141,6 @@ def _build_schema_prompt(message: str, hits: list) -> str:
 
 _PINNED_TABLES = {"dbo.FactInternetSales", "dbo.FactResellerSales"}
 
-_GEO_COUNTRY_KEYWORDS = {
-    "país", "pais", "region", "región", "territorio",
-    "canada", "united states", "estados unidos", "australia", "germany",
-    "alemania", "france", "francia", "united kingdom", "reino unido",
-    "north america", "europe", "pacific", "norteamerica", "europa",
-}
-_GEO_CITY_KEYWORDS = {
-    "ciudad", "estado", "provincia", "código postal", "codigo postal",
-    "city", "state", "postal", "zip",
-}
-_GEO_KEYWORDS = _GEO_COUNTRY_KEYWORDS | _GEO_CITY_KEYWORDS
-_GEO_PINNED = {"dbo.DimSalesTerritory", "dbo.DimGeography", "dbo.DimCustomer"}
-_GEO_CITY_PINNED = {"dbo.DimGeography", "dbo.DimCustomer"}
-
-_PRODUCT_CAT_KEYWORDS = {
-    "categoría", "categoria", "categorias", "categorías",
-    "subcategoría", "subcategoria", "subcategorias", "subcategorías",
-    "tipo de producto", "clase de producto", "grupo de producto",
-    "bicicletas", "ropa", "accesorios", "componentes",
-    "crecimiento por categoria", "ventas por categoria",
-}
-_PRODUCT_CAT_PINNED = {"dbo.DimProductSubcategory", "dbo.DimProductCategory"}
-
 
 def _inject_schema_rag(message: str) -> str:
     if not SCHEMA_STORE:
@@ -1168,21 +1154,13 @@ def _inject_schema_rag(message: str) -> str:
             raw_hits = SCHEMA_STORE.query(message, k=RAG_K_FETCH)
             hits = _filter_and_deduplicate(raw_hits)
 
-            # Tablas siempre incluidas + geo cuando la pregunta lo requiere
-            q_lower = message.lower()
-            extra_pins = set(_PINNED_TABLES)
-            if any(kw in q_lower for kw in _GEO_KEYWORDS):
-                extra_pins |= _GEO_PINNED
-            if any(kw in q_lower for kw in _GEO_CITY_KEYWORDS):
-                extra_pins |= _GEO_CITY_PINNED
-            if any(kw in q_lower for kw in _PRODUCT_CAT_KEYWORDS):
-                extra_pins |= _PRODUCT_CAT_PINNED
-
+            # Pinear siempre las tablas Fact fundamentales
             hit_tables = {
                 f"{h.get('meta', {}).get('schema', 'dbo')}.{h.get('meta', {}).get('table', '')}"
                 for h in hits
+                if h.get('meta', {}).get('type') not in ('join_path', 'join_chain')
             }
-            for pinned in extra_pins:
+            for pinned in _PINNED_TABLES:
                 if pinned not in hit_tables:
                     pinned_table = pinned.split(".")[-1]
                     pinned_hits = SCHEMA_STORE.query(pinned_table, k=1)
@@ -1210,9 +1188,15 @@ async def run_agent_stream_text(
     request_context: RequestContext,
     message: str,
     conversation_id: Optional[str],
+    retry: bool = False,
 ) -> AsyncGenerator[str, None]:
 
     original_question = message
+
+    # En reintento forzamos SQL fresco evictando la entrada cacheada
+    if retry:
+        _evict_sql_cache(original_question)
+        logger.info("Reintento — cache evictado para '%s'", original_question)
 
     # 1. Cache
     cache_hit = _search_sql_cache(original_question)
@@ -1298,12 +1282,9 @@ async def run_agent_stream_text(
             captured_sql.append(sql)
             logger.info("SQL capturado: %s", sql)
 
-    if TRACKING_TOOL:
-        TRACKING_TOOL.set_callback(on_sql_executed)
-        TRACKING_TOOL.set_question(original_question)
-        logger.info("TrackingSqlTool callback actualizado (id=%s)", id(TRACKING_TOOL))
-    else:
-        logger.warning("TRACKING_TOOL no inicializado")
+    _ctx_sql_callback.set(on_sql_executed)
+    _ctx_sql_question.set(original_question)
+    _ctx_sql_inflight.set(set())
 
     # 4. Ejecutar agente
     pre_table_buffer: list[str] = []
@@ -1311,12 +1292,22 @@ async def run_agent_stream_text(
     post_table_chunks: list[str] = []
     table_seen = False
 
+    agen = agent.send_message(
+        request_context=request_context,
+        message=message,
+        conversation_id=conversation_id,
+    )
     try:
-        async for component in agent.send_message(
-            request_context=request_context,
-            message=message,
-            conversation_id=conversation_id,
-        ):
+        while True:
+            try:
+                component = await asyncio.wait_for(agen.__anext__(), timeout=AGENT_STEP_TIMEOUT)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                logger.warning("Agent timeout — paso excedió %.0f s", AGENT_STEP_TIMEOUT)
+                yield ERROR_RETRY_SENTINEL + "El agente tardó demasiado en responder."
+                return
+
             text_output = extract_text_from_component(component)
             if not text_output:
                 continue
@@ -1332,8 +1323,10 @@ async def run_agent_stream_text(
 
     except Exception:
         logger.exception("Error en agent.send_message")
-        yield "Ocurrió un error procesando tu pregunta. Por favor intenta de nuevo."
+        yield ERROR_RETRY_SENTINEL + "Ocurrió un error procesando tu pregunta."
         return
+    finally:
+        await agen.aclose()
 
     # 5. Emitir respuesta
     logger.info(
@@ -1514,15 +1507,15 @@ def build_agent() -> Agent:
     odbc_str = os.getenv("SQLSERVER_ODBC")
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    global SQL_RUNNER, TRACKING_TOOL
+    global SQL_RUNNER
     SQL_RUNNER = SqlServerRunner(odbc_str)
 
     llm = OpenAILlmService(model=model, api_key=api_key)
 
     tools = ToolRegistry()
-    TRACKING_TOOL = TrackingSqlTool(sql_runner=SQL_RUNNER)
-    tools.register_local_tool(TRACKING_TOOL, access_groups=["admin", "user"])
-    logger.info("TrackingSqlTool registrado (id=%s)", id(TRACKING_TOOL))
+    tracking_tool = TrackingSqlTool(sql_runner=SQL_RUNNER)
+    tools.register_local_tool(tracking_tool, access_groups=["admin", "user"])
+    logger.info("TrackingSqlTool registrado")
 
     agent_memory = ChromaAgentMemory(
         persist_directory=path_memory,
@@ -1544,6 +1537,29 @@ def build_agent() -> Agent:
             logger.info("Auto-ingest completado: %d entradas", SCHEMA_STORE.count())
         except Exception:
             logger.exception("Error en auto-ingest del esquema — el agente continuará sin RAG de esquema")
+    else:
+        # Verificar que los join paths estén indexados; si no, ingestarlos
+        try:
+            jp_check = SCHEMA_STORE.col.get(where={"type": "join_path"}, limit=1)
+            if not jp_check.get("ids"):
+                logger.info("Join paths no encontrados en schema store — indexando relaciones FK")
+                from .ingest_schema import (
+                    get_connection, fetch_all_fk_relations, build_join_path_docs,
+                )
+                conn = get_connection()
+                cursor = conn.cursor()
+                all_fks = fetch_all_fk_relations(cursor)
+                docs = build_join_path_docs(all_fks)
+                for d in docs:
+                    SCHEMA_STORE.upsert(
+                        ids=[d["id"]],
+                        documents=[d["doc"]],
+                        metadatas=[d["meta"]],
+                    )
+                conn.close()
+                logger.info("Join paths indexados: %d — schema store total: %d", len(docs), SCHEMA_STORE.count())
+        except Exception:
+            logger.exception("Error verificando/indexando join paths")
 
     return Agent(
         llm_service=llm,

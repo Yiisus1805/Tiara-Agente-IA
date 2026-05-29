@@ -343,6 +343,36 @@ main {
   color: white;
 }
 
+/* ── Error con reintento ───────────────────────────────────────── */
+
+.error-retry {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.error-msg {
+  margin: 0;
+  color: #c0392b;
+  font-size: 0.9rem;
+}
+
+.retry-btn {
+  align-self: flex-start;
+  padding: 8px 16px;
+  background: var(--sac-blue);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: opacity 0.15s;
+}
+
+.retry-btn:hover { opacity: 0.85; }
+.retry-btn:active { transform: scale(0.97); }
+
 /* ── Streaming content ─────────────────────────────────────────── */
 
 .stream-text {

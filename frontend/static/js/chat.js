@@ -140,37 +140,59 @@ function createTypewriter(bubble, scrollEl) {
 }
 
 
-// ── Main send ────────────────────────────────────────────────────────────────
+// ── SSE stream helper ────────────────────────────────────────────────────────
 
-async function sendMessage() {
-  const text = userInput.value.trim();
-  if (!text) return;
+const SSE_IDLE_TIMEOUT_MS = 35000; // 35 s sin datos → reintento automático
 
-  userInput.value = "";
-  appendMessage("user", text);
-  sendBtn.disabled = true;
+function readWithTimeout(reader, ms) {
+  return Promise.race([
+    reader.read(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("sse_timeout")), ms)
+    ),
+  ]);
+}
 
-  const botBubble = appendMessage(
-    "bot",
-    '<span class="thinking">Tiara está pensando<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>'
-  );
-
-  const tw = createTypewriter(botBubble, chatContainer);
+async function streamIntoBubble(question, bubble, isRetry) {
+  const tw = createTypewriter(bubble, chatContainer);
   let thinkingRemoved = false;
 
   function removeThinking() {
     if (!thinkingRemoved) {
-      const el = botBubble.querySelector(".thinking");
+      const el = bubble.querySelector(".thinking");
       if (el) el.remove();
       thinkingRemoved = true;
     }
+  }
+
+  function showRetryError(message) {
+    tw.flush();
+    removeThinking();
+    bubble.innerHTML = "";
+
+    const wrap = document.createElement("div");
+    wrap.className = "error-retry";
+
+    const msg = document.createElement("p");
+    msg.className = "error-msg";
+    msg.textContent = message || "Ocurrió un error al generar la respuesta.";
+
+    const btn = document.createElement("button");
+    btn.className = "btn retry-btn";
+    btn.textContent = "↺ Intentar de nuevo";
+    btn.onclick = () => retryMessage(question, bubble);
+
+    wrap.appendChild(msg);
+    wrap.appendChild(btn);
+    bubble.appendChild(wrap);
+    sendBtn.disabled = false;
   }
 
   try {
     const response = await fetch("/api/tiara/chat_stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: text, conversation_id: conversationId })
+      body: JSON.stringify({ question, conversation_id: conversationId, retry: isRetry })
     });
 
     const reader = response.body.getReader();
@@ -178,7 +200,16 @@ async function sendMessage() {
     let buffer = "";
 
     while (true) {
-      const { value, done } = await reader.read();
+      let value, done;
+      try {
+        ({ value, done } = await readWithTimeout(reader, SSE_IDLE_TIMEOUT_MS));
+      } catch (e) {
+        if (e.message === "sse_timeout") {
+          showRetryError("Sin respuesta del servidor. Haz clic para intentar de nuevo.");
+          return;
+        }
+        throw e;
+      }
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -202,7 +233,7 @@ async function sendMessage() {
 
         if (data.type === "chart") {
           tw.flush();
-          renderPlotlyChart(botBubble, data.data);
+          renderPlotlyChart(bubble, data.data);
           chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
@@ -211,9 +242,13 @@ async function sendMessage() {
           sendBtn.disabled = false;
         }
 
+        if (data.type === "error_retry") {
+          showRetryError(data.message);
+        }
+
         if (data.type === "error") {
           tw.flush();
-          botBubble.innerHTML = "Ocurrió un error: " + data.error;
+          bubble.innerHTML = "Ocurrió un error: " + data.error;
           sendBtn.disabled = false;
         }
       }
@@ -223,9 +258,37 @@ async function sendMessage() {
 
   } catch (err) {
     tw.flush();
-    botBubble.innerHTML = "Error conectando con Tiara.";
+    bubble.innerHTML = "Error conectando con Tiara.";
     sendBtn.disabled = false;
   }
+}
+
+
+// ── Main send ────────────────────────────────────────────────────────────────
+
+async function sendMessage() {
+  const text = userInput.value.trim();
+  if (!text) return;
+
+  userInput.value = "";
+  appendMessage("user", text);
+  sendBtn.disabled = true;
+
+  const botBubble = appendMessage(
+    "bot",
+    '<span class="thinking">Tiara está pensando<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>'
+  );
+
+  await streamIntoBubble(text, botBubble, false);
+}
+
+
+// ── Retry (same bubble, cache evictado en backend) ───────────────────────────
+
+async function retryMessage(question, bubble) {
+  bubble.innerHTML = '<span class="thinking">Tiara está pensando<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>';
+  sendBtn.disabled = true;
+  await streamIntoBubble(question, bubble, true);
 }
 
 
