@@ -42,10 +42,11 @@ _FK_COL_SET: set[tuple[str, str]] = set()
 _ctx_sql_callback: ContextVar = ContextVar("_tiara_sql_cb", default=None)
 _ctx_sql_question: ContextVar = ContextVar("_tiara_sql_q", default="")
 _ctx_sql_inflight: ContextVar = ContextVar("_tiara_sql_inflight", default=None)
+_ctx_intent: ContextVar = ContextVar("_tiara_intent", default="")
 
 RAG_K_FETCH = 15
 RAG_K_FINAL = 8
-SQL_CACHE_THRESHOLD = 0.97
+SQL_CACHE_THRESHOLD = 0.98
 MAX_ROWS_LIMIT = 500
 MAX_RESPONSE_CACHE_LEN = 100_000
 
@@ -759,9 +760,18 @@ def _search_sql_cache(question: str) -> Optional[dict]:
 
         if has_temporals:
             sql = _inject_temporals(sql_template, temporals)
+            # Si quedaron placeholders sin reemplazar (ej: __YEAR2__ cuando la
+            # pregunta actual solo tiene 1 año), el SQL sería inválido → ignorar cache
+            if re.search(r'__\w+__', sql):
+                logger.info("Cache HIT ignorado: SQL tiene placeholders sin resolver tras inyección")
+                return None
             logger.info("Cache HIT con temporales sustituidos: %s", temporals)
         else:
             sql = sql_template
+
+        # Validar que el valor de distance es usable
+        if not isinstance(distance, (int, float)):
+            return None
 
         return {
             "sql": sql,
@@ -958,14 +968,22 @@ def _is_numeric_col(col: str, rows: list) -> bool:
     return has_value
 
 
-def _raw_numeric(v: Any) -> float:
+def _raw_numeric(v: Any) -> Optional[float]:
+    """Convierte a float o retorna None si el valor no es numérico."""
     if v is None:
-        return 0.0
+        return None
+    if isinstance(v, bool):
+        return None
     if isinstance(v, Decimal):
         return float(v)
     if isinstance(v, (int, float)):
         return float(v)
-    return 0.0
+    if isinstance(v, str):
+        try:
+            return float(v.replace(",", ""))
+        except ValueError:
+            return None
+    return None
 
 
 def _build_chart_payload(question: str, cols: list, rows: list) -> dict:
@@ -1002,7 +1020,9 @@ def _build_chart_payload(question: str, cols: list, rows: list) -> dict:
 
     if chart_type == "pie":
         values   = [_raw_numeric(r.get(value_cols[0])) for r in rows]
-        pie_data = [{"name": l, "value": v} for l, v in zip(labels, values)]
+        pie_data = [{"name": l, "value": v} for l, v in zip(labels, values) if v is not None]
+        if not pie_data:
+            return {}
         option.update({
             "tooltip": {"trigger": "item", "formatter": "{b}<br/>{c} ({d}%)"},
             "legend": {
@@ -1041,7 +1061,7 @@ def _build_chart_payload(question: str, cols: list, rows: list) -> dict:
         for i, vcol in enumerate(value_cols):
             c     = _EC_COLORS[i % len(_EC_COLORS)]
             area  = _EC_AREA_RGBA[i % len(_EC_AREA_RGBA)]
-            clear = area.replace("0.22", "0")
+            clear = re.sub(r',\s*[\d.]+\)', ", 0)", area)
             option["series"].append({
                 "name": vcol, "type": "line",
                 "data": [_raw_numeric(r.get(vcol)) for r in rows],
@@ -1257,17 +1277,24 @@ async def _run_prediction(question: str) -> tuple[str, dict]:
         if df.empty or len(df) < 2:
             return "No hay suficientes datos históricos para proyectar.", {}
 
+        df = df.dropna(subset=["CalendarYear", "TotalSales"])
+        if len(df) < 2:
+            return "No hay suficientes datos históricos para proyectar.", {}
+
         years = df["CalendarYear"].astype(int).tolist()
         sales = df["TotalSales"].astype(float).tolist()
 
         # Excluir el último año si parece incompleto (< 10% del año anterior)
         if len(sales) >= 2 and sales[-2] > 0 and (sales[-1] / sales[-2]) < 0.10:
             logger.warning(
-                "Año %d parece incompleto ($%,.0f vs $%,.0f) — excluido de la proyección",
-                years[-1], sales[-1], sales[-2],
+                "Año %d parece incompleto ($%s vs $%s) — excluido de la proyección",
+                years[-1], f"{sales[-1]:,.0f}", f"{sales[-2]:,.0f}",
             )
             years = years[:-1]
             sales = sales[:-1]
+
+        if len(years) < 2:
+            return "No hay suficientes años de datos para calcular una proyección confiable.", {}
 
         target_year = int(year_match.group()) if year_match else max(years) + 1
 
@@ -1285,6 +1312,8 @@ async def _run_prediction(question: str) -> tuple[str, dict]:
             if y[i - 1] > 0
         ]
         median_yoy = float(np.median(yoy_rates)) if yoy_rates else 0.0
+        # Limitar tasa a rango razonable para evitar proyecciones absurdas
+        median_yoy = max(-0.9, min(median_yoy, 10.0))
         years_ahead = max(1, target_year - int(max(years)))
         projected_yoy = float(y[-1] * (1 + median_yoy) ** years_ahead)
         growth_pct = median_yoy * 100
@@ -1502,7 +1531,7 @@ async def _classify_intent(message: str) -> str:
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
                     "model": model,
-                    "max_tokens": 10,
+                    "max_tokens": 20,
                     "temperature": 0,
                     "messages": [
                         {
@@ -1530,12 +1559,16 @@ async def _classify_intent(message: str) -> str:
                     ],
                 },
             )
-            result = resp.json()["choices"][0]["message"]["content"].strip().upper()
-            if "DISCOVERY" in result:
+            raw = resp.json()["choices"][0]["message"]["content"].strip().upper()
+            # Extraer primera palabra — el LLM a veces añade contexto extra
+            first_word = raw.split()[0] if raw.split() else ""
+            if first_word in ("DISCOVERY", "SQL", "PREDICTION", "CHAT"):
+                intent = first_word
+            elif "DISCOVERY" in raw:
                 intent = "DISCOVERY"
-            elif "PREDICTION" in result:
+            elif "PREDICTION" in raw:
                 intent = "PREDICTION"
-            elif "CHAT" in result:
+            elif "CHAT" in raw:
                 intent = "CHAT"
             else:
                 intent = "SQL"
@@ -1825,6 +1858,7 @@ async def run_agent_stream_text(
     # 0. Clasificar intención — enruta a SQL, proyección, discovery o conversación
     if not retry:
         intent = await _classify_intent(original_question)
+        _ctx_intent.set(intent)
         if intent == "CHAT":
             yield await _get_chat_response(original_question)
             return
@@ -1868,7 +1902,7 @@ async def run_agent_stream_text(
                 logger.info("Cache HIT ignorado: pregunta de gráfico con respuesta sin tabla — regenerando")
             else:
                 logger.info("Cache HIT con full_response")
-                if '<table' in full_response and '</table>' in full_response:
+                if '<table' in full_response.lower() and '</table>' in full_response.lower():
                     table_end = full_response.lower().rfind('</table>') + len('</table>')
                     yield full_response[:table_end].strip()      # → tipo 'table' → fade-in
                     text_part = full_response[table_end:].strip()
@@ -1946,47 +1980,71 @@ async def run_agent_stream_text(
     meaningful_post_analysis = False  # True cuando se emitió análisis sustancial (>20 chars)
     response_chunks: list[str] = []
 
-    agen = agent.send_message(
-        request_context=request_context,
-        message=message,
-        conversation_id=conversation_id,
-    )
+    async def _step_agent(conv_id: Optional[str]):
+        """Ejecuta el agente llenando los buffers. Lanza excepción si falla."""
+        nonlocal table_seen, meaningful_post_analysis
+        agen = agent.send_message(
+            request_context=request_context,
+            message=message,
+            conversation_id=conv_id,
+        )
+        try:
+            while True:
+                try:
+                    component = await asyncio.wait_for(agen.__anext__(), timeout=AGENT_STEP_TIMEOUT)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning("Agent timeout — paso excedió %.0f s", AGENT_STEP_TIMEOUT)
+                    raise TimeoutError("timeout")
+
+                text_output = extract_text_from_component(component)
+                if not text_output:
+                    continue
+
+                if '<table' in text_output:
+                    table_seen = True
+                    tabla_chunks.append(text_output)
+                elif table_seen:
+                    if not _is_vague_analysis(text_output):
+                        post_table_chunks.append(text_output)
+                        response_chunks.append(text_output)
+                        yield text_output
+                        if len(text_output.strip()) > 20:
+                            meaningful_post_analysis = True
+                else:
+                    pre_table_buffer.append(text_output)
+        finally:
+            await agen.aclose()
+
     try:
-        while True:
-            try:
-                component = await asyncio.wait_for(agen.__anext__(), timeout=AGENT_STEP_TIMEOUT)
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                logger.warning("Agent timeout — paso excedió %.0f s", AGENT_STEP_TIMEOUT)
-                yield ERROR_RETRY_SENTINEL + "El agente tardó demasiado en responder."
-                return
-
-            text_output = extract_text_from_component(component)
-            if not text_output:
-                continue
-
-            if '<table' in text_output:
-                table_seen = True
-                tabla_chunks.append(text_output)
-            elif table_seen:
-                # Texto post-tabla: emitir inmediatamente si no es vago
-                if not _is_vague_analysis(text_output):
-                    post_table_chunks.append(text_output)
-                    response_chunks.append(text_output)
-                    yield text_output
-                    if len(text_output.strip()) > 20:
-                        meaningful_post_analysis = True
-                # si es vago o trivial: el fallback lo reemplazará
-            else:
-                pre_table_buffer.append(text_output)
-
-    except Exception:
-        logger.exception("Error en agent.send_message")
-        yield ERROR_RETRY_SENTINEL + "Ocurrió un error procesando tu pregunta."
+        async for chunk in _step_agent(conversation_id):
+            yield chunk
+    except TimeoutError:
+        yield ERROR_RETRY_SENTINEL + "El agente tardó demasiado en responder."
         return
-    finally:
-        await agen.aclose()
+    except Exception as exc:
+        # Historial corrupto por tool_call sin respuesta → limpiar y reintentar una vez
+        if "tool_call" in str(exc).lower() and conversation_id and not retry:
+            logger.warning(
+                "Historial corrupto (tool_calls sin respuesta) — limpiando conv %s y reintentando",
+                conversation_id,
+            )
+            try:
+                await agent.conversation_store.delete_conversation(conversation_id)
+            except Exception:
+                pass
+            try:
+                async for chunk in _step_agent(conversation_id):
+                    yield chunk
+            except Exception:
+                logger.exception("Error en reintento tras limpiar conversación")
+                yield ERROR_RETRY_SENTINEL + "Ocurrió un error procesando tu pregunta."
+                return
+        else:
+            logger.exception("Error en agent.send_message")
+            yield ERROR_RETRY_SENTINEL + "Ocurrió un error procesando tu pregunta."
+            return
 
     # 5. Emitir respuesta
     logger.info(

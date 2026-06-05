@@ -170,6 +170,46 @@ function escHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+// ── Logs & Auditoría ─────────────────────────────────────────────────────────
+
+const INTENT_LABELS = {
+  SQL: "SQL", PREDICTION: "Predicción", DISCOVERY: "Discovery", CHAT: "Chat"
+};
+
+async function loadLogs() {
+  const resp = await apiFetch("/api/admin/logs/summary");
+  if (!resp) return;
+  const data = await resp.json();
+
+  document.getElementById("metric-total").textContent = data.total ?? "—";
+
+  const ms = data.avg_duration_ms ?? 0;
+  document.getElementById("metric-avg").textContent =
+    ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+
+  document.getElementById("metric-top-intent").textContent =
+    INTENT_LABELS[data.top_intent] ?? data.top_intent ?? "—";
+
+  document.getElementById("metric-success").textContent =
+    data.success_rate != null ? `${data.success_rate}%` : "—";
+
+  const counts = data.intent_counts ?? {};
+  const total = data.total || 1;
+  document.getElementById("intent-breakdown").innerHTML = Object.entries(counts)
+    .map(([intent, cnt]) => {
+      const pct = Math.round(cnt / total * 100);
+      return `
+        <div class="intent-row">
+          <span class="intent-name">${escHtml(INTENT_LABELS[intent] ?? intent)}</span>
+          <div class="intent-bar-wrap">
+            <div class="intent-bar" style="width:${pct}%"></div>
+          </div>
+          <span class="intent-count">${cnt} (${pct}%)</span>
+        </div>`;
+    }).join("") || '<p class="loading">Sin datos aún.</p>';
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadCache();
 loadSchema();
+loadLogs();

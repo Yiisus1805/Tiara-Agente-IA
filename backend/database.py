@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from urllib.parse import quote_plus
 
@@ -68,24 +69,44 @@ class SqlServerRunner(SqlRunner):
 
         return sql
 
-    def _is_allowed(self, sql: str) -> bool:
+    _BLOCKED_STARTS = (
+        "insert", "update", "delete", "drop", "alter", "create",
+        "truncate", "exec", "execute", "merge", "grant", "revoke",
+    )
+    _BLOCKED_INLINE = {
+        "xp_cmdshell", "sp_executesql", "openrowset", "opendatasource",
+        "bulk insert", "sys.server_principals", "sys.credentials",
+        "sys.login_token", "sys.sql_logins", "sys.asymmetric_keys",
+    }
+    _STACKED_RE = re.compile(
+        r";\s*(insert|update|delete|drop|alter|create|truncate|exec|execute|merge|grant|revoke)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_allowed(self, sql: str) -> tuple[bool, str]:
         if not sql:
-            return False
+            return False, "SQL vacío"
         lower = sql.lower().lstrip()
 
-        blocked_starts = (
-            "insert", "update", "delete", "drop", "alter", "create",
-            "truncate", "exec", "execute", "merge", "grant", "revoke"
-        )
-        if lower.startswith(blocked_starts):
-            return False
+        if lower.startswith(self._BLOCKED_STARTS):
+            return False, "Solo consultas SELECT están permitidas"
 
-        return lower.startswith("select") or lower.startswith("with")
+        if not (lower.startswith("select") or lower.startswith("with")):
+            return False, "Solo consultas SELECT están permitidas"
+
+        if self._STACKED_RE.search(sql):
+            return False, "Consultas apiladas (stacked queries) no están permitidas"
+
+        if any(kw in lower for kw in self._BLOCKED_INLINE):
+            return False, "La consulta contiene funciones o tablas del sistema no permitidas"
+
+        return True, ""
 
     async def run_sql(self, args: RunSqlToolArgs, context: ToolContext) -> pd.DataFrame:
         sql = self._normalize_sql(args.sql)
-        if not self._is_allowed(sql):
-            raise ValueError("Solo consultas SELECT (y WITH ... SELECT) permitidas")
+        allowed, reason = self._is_allowed(sql)
+        if not allowed:
+            raise ValueError(reason)
 
         def _query() -> pd.DataFrame:
             with self.engine.connect() as conn:

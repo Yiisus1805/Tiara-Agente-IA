@@ -27,6 +27,7 @@
   <div class="tabs">
     <button class="tab active" onclick="switchTab('cache')">Cache SQL</button>
     <button class="tab" onclick="switchTab('schema')">Schema Store</button>
+    <button class="tab" onclick="switchTab('logs')">Logs & Auditoría</button>
   </div>
 
   <!-- ── Cache SQL ── -->
@@ -98,6 +99,36 @@
         </tbody>
       </table>
     </div>
+  </section>
+
+  <!-- ── Logs & Auditoría ── -->
+  <section id="tab-logs" class="tab-content hidden">
+    <div class="section-header">
+      <div>
+        <h2>Logs & Auditoría</h2>
+        <p class="section-desc">Métricas de uso del sistema en tiempo real.</p>
+      </div>
+      <button class="btn-secondary" onclick="loadLogs()">↺ Actualizar</button>
+    </div>
+    <div class="metrics-grid" id="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-value" id="metric-total">—</div>
+        <div class="metric-label">Total consultas</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-avg">—</div>
+        <div class="metric-label">Tiempo promedio</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-top-intent">—</div>
+        <div class="metric-label">Intención más usada</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-success">—</div>
+        <div class="metric-label">Tasa de éxito</div>
+      </div>
+    </div>
+    <div class="intent-breakdown" id="intent-breakdown"></div>
   </section>
 </main>
 

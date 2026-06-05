@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_auth
+from . import audit
 
 router = APIRouter(prefix="/api/admin", dependencies=[Depends(require_auth)])
 
@@ -98,6 +99,13 @@ async def delete_schema_entry(entry_id: str):
         raise HTTPException(status_code=503, detail="Schema store no disponible")
     store.col.delete(ids=[entry_id])
     return {"status": "deleted", "id": entry_id}
+
+
+# ── Logs & Auditoría ─────────────────────────────────────────────────────────
+
+@router.get("/logs/summary")
+async def logs_summary():
+    return audit.get_summary()
 
 
 # ── Auth info ─────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import traceback
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -13,9 +14,10 @@ from sqlalchemy import text
 
 from vanna.core.user import RequestContext
 
-from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL, ERROR_RETRY_SENTINEL, TABLE_FLUSH_SENTINEL
+from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL, ERROR_RETRY_SENTINEL, TABLE_FLUSH_SENTINEL, _ctx_intent
 from .auth import check_credentials, create_token, require_auth
 from .admin import router as admin_router
+from . import audit
 
 
 agent = build_agent()
@@ -114,6 +116,8 @@ async def tiara_chat_stream(request: Request, _user: dict = Depends(require_auth
         ctx = build_request_context(request)
 
         async def sse():
+            start_time = time.time()
+            success = True
             try:
                 yield f"data: {json.dumps({'type': 'start'})}\n\n"
 
@@ -132,6 +136,7 @@ async def tiara_chat_stream(request: Request, _user: dict = Depends(require_auth
                     retry=is_retry,
                 ):
                     if chunk.startswith(ERROR_RETRY_SENTINEL):
+                        success = False
                         msg = chunk[len(ERROR_RETRY_SENTINEL):]
                         yield f"data: {json.dumps({'type': 'error_retry', 'message': msg})}\n\n"
                     elif chunk == TABLE_FLUSH_SENTINEL:
@@ -156,8 +161,14 @@ async def tiara_chat_stream(request: Request, _user: dict = Depends(require_auth
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
             except Exception as e:
+                success = False
                 yield f"data: {json.dumps({'type': 'error_retry', 'message': 'Ocurrió un error inesperado.'})}\n\n"
                 traceback.print_exc()
+            finally:
+                duration_ms = int((time.time() - start_time) * 1000)
+                intent = _ctx_intent.get() or "SQL"
+                username = _user.get("sub", "unknown")
+                audit.log(username, question, intent, duration_ms, is_retry, success)
 
         return StreamingResponse(
             sse(),
