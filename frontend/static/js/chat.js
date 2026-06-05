@@ -1,3 +1,16 @@
+// ── Auth guard ──────────────────────────────────────────────────────────────
+const _token = localStorage.getItem("tiara_token");
+if (!_token) window.location.href = "/login";
+
+function _authHeaders() {
+  return { "Authorization": `Bearer ${_token}`, "Content-Type": "application/json" };
+}
+
+function _handleUnauth() {
+  localStorage.removeItem("tiara_token");
+  window.location.href = "/login";
+}
+
 let conversationId = crypto.randomUUID();
 let firstMessage = true;
 
@@ -65,7 +78,8 @@ function createTypewriter(bubble, scrollEl) {
 
   function flush() {
     for (const item of queue) {
-      item.el.textContent = item.text;
+      // Solo agregar los caracteres que drain no animó aún
+      item.el.textContent += item.text.substring(item.pos);
     }
     queue = [];
     running = false;
@@ -121,11 +135,37 @@ function createTypewriter(bubble, scrollEl) {
         currentEl = null;
       }
 
+      // Toolbar con botón de exportar Excel
+      const outerWrap = document.createElement("div");
+      outerWrap.className = "table-outer-wrap table-fade-in";
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "chart-toolbar";
+
+      const exportBtn = document.createElement("button");
+      exportBtn.className = "chart-export-btn";
+      exportBtn.title = "Exportar tabla a Excel";
+      exportBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Exportar Excel`;
+
+      toolbar.appendChild(exportBtn);
+      outerWrap.appendChild(toolbar);
+
       const wrapper = document.createElement("div");
-      wrapper.className = "table-container table-fade-in";
+      wrapper.className = "table-container";
       wrapper.innerHTML = tableHtml;
-      bubble.appendChild(wrapper);
+      outerWrap.appendChild(wrapper);
+
+      bubble.appendChild(outerWrap);
       scrollEl.scrollTop = scrollEl.scrollHeight;
+
+      exportBtn.addEventListener("click", () => {
+        const tableEl = wrapper.querySelector("table");
+        if (!tableEl || typeof XLSX === "undefined") return;
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.table_to_sheet(tableEl);
+        XLSX.utils.book_append_sheet(wb, ws, "Datos");
+        XLSX.writeFile(wb, "datos-tiara.xlsx");
+      });
 
       if (after) {
         const el = getTextEl();
@@ -191,9 +231,11 @@ async function streamIntoBubble(question, bubble, isRetry) {
   try {
     const response = await fetch("/api/tiara/chat_stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: _authHeaders(),
       body: JSON.stringify({ question, conversation_id: conversationId, retry: isRetry })
     });
+
+    if (response.status === 401) { _handleUnauth(); return; }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -296,15 +338,34 @@ function renderPlotlyChart(bubble, chartData) {
   const wrapper = document.createElement("div");
   wrapper.className = "chart-container";
 
+  const toolbar = document.createElement("div");
+  toolbar.className = "chart-toolbar";
+
+  const exportBtn = document.createElement("button");
+  exportBtn.className = "chart-export-btn";
+  exportBtn.title = "Exportar gráfico como imagen PNG";
+  exportBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Exportar`;
+
+  toolbar.appendChild(exportBtn);
+
   const div = document.createElement("div");
   div.style.width = "100%";
   div.style.height = "420px";
 
+  wrapper.appendChild(toolbar);
   wrapper.appendChild(div);
   bubble.appendChild(wrapper);
 
   const chart = echarts.init(div, null, { renderer: "canvas" });
   chart.setOption(chartData);
+
+  exportBtn.addEventListener("click", () => {
+    const url = chart.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "#ffffff" });
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "grafico-tiara.png";
+    a.click();
+  });
 
   window.addEventListener("resize", () => chart.resize());
 }
@@ -312,7 +373,9 @@ function renderPlotlyChart(bubble, chartData) {
 
 async function resetChat() {
   try {
-    await fetch(`/api/tiara/conversations/${conversationId}`, { method: "DELETE" });
+    await fetch(`/api/tiara/conversations/${conversationId}`, {
+      method: "DELETE", headers: _authHeaders(),
+    });
   } catch (e) {}
 
   conversationId = crypto.randomUUID();

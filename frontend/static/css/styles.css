@@ -1,17 +1,17 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --sac-blue: #1565C0;
-  --sac-orange: #F4511E;
-  --bg: #f0f2f5;
+  --sac-blue: #003274;
+  --sac-orange: #FF650A;
+  --bg: #eef1f5;
   --white: #ffffff;
-  --user-bubble: #d0e8f8;
-  --bot-bubble: #e8e8e8;
+  --user-bubble: #003274;
+  --bot-bubble: #ffffff;
   --text: #1a1a2e;
-  --muted: #666;
-  --border: #d8dde6;
-  --shadow: 0 4px 24px rgba(0,0,0,0.09);
-  --radius: 16px;
+  --muted: #7a8499;
+  --border: #dde1ea;
+  --shadow: 0 2px 16px rgba(0,0,0,0.07);
+  --radius: 20px;
 }
 
 body {
@@ -26,8 +26,8 @@ body {
 
 header {
   background: var(--white);
-  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-  padding: 14px 32px;
+  box-shadow: 0 1px 0 var(--border);
+  padding: 12px 32px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -44,10 +44,14 @@ header {
 }
 
 .header-title {
-  font-size: 2rem;
+  font-size: 1.4rem;
   font-weight: 900;
-  color: var(--sac-blue);
+  letter-spacing: -0.3px;
 }
+
+.t-blue    { color: #003274; }
+.t-celeste { color: #0096B9; }
+.t-orange  { color: #FF650A; }
 
 .logo-img {
   height: 55px;
@@ -62,19 +66,19 @@ main {
   max-width: 1400px;
   width: 100%;
   margin: auto;
- padding: 28px 40px 180px;
+ padding: 24px 40px 130px;
   overflow: hidden;
   min-height: 0;
 }
 
 #chat-container {
-  background: var(--white);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 28px 28px;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 8px 0;
   display: none;
   flex-direction: column;
-  gap: 18px;
+  gap: 6px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -101,46 +105,53 @@ main {
 }
 
 .msg.bot .bubble {
-  max-width: 65%;
+  max-width: 68%;
   background: var(--bot-bubble);
-  border-bottom-left-radius: 4px;
+  border-bottom-left-radius: 6px;
   color: var(--text);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  border: 1px solid var(--border);
 }
 
 .msg.bot .bubble:has(.table-container),
 .msg.bot .bubble:has(table) {
-  max-width: 65%;
+  max-width: 68%;
   width: fit-content;
   background: var(--bot-bubble);
   padding: 12px 14px;
-  border-bottom-left-radius: 4px;
+  border-bottom-left-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  border: 1px solid var(--border);
 }
 
 .msg-label {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 700;
   color: var(--muted);
-  margin-bottom: 2px;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }
 
 .msg.user .msg-label {
-  color: var(--sac-blue);
+  color: var(--muted);
 }
 
 .bubble {
   padding: 12px 16px;
-  border-radius: 14px;
-  font-size: 0.94rem;
-  line-height: 1.6;
+  border-radius: 18px;
+  font-size: 0.93rem;
+  line-height: 1.65;
   word-break: break-word;
   min-width: 0;
 }
 
 .msg.user .bubble {
-  max-width: 82%;
+  max-width: 72%;
   background: var(--user-bubble);
-  border-bottom-right-radius: 4px;
-  color: #0d3b6e;
+  border-bottom-right-radius: 6px;
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(21,101,192,0.25);
 }
 
 .welcome-screen {
@@ -275,11 +286,10 @@ main {
   bottom: 0;
   left: 0;
   right: 0;
-  background: var(--bg);
+  background: linear-gradient(to top, var(--bg) 70%, transparent);
   border-top: none;
-  padding: 16px 40px;
+  padding: 12px 40px 20px;
   z-index: 100;
-  overflow: hidden;
 }
 
 .input-inner {
@@ -287,61 +297,76 @@ main {
   width: 100%;
   margin: 0 auto;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
   background: var(--white);
-  border-radius: 16px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  box-shadow: 0 -2px 16px rgba(0,0,0,0.06);
+  border-radius: 18px;
+  padding: 8px 8px 8px 16px;
+  border: 1.5px solid var(--border);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.09);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.input-inner:focus-within {
+  border-color: var(--sac-blue);
+  box-shadow: 0 4px 24px rgba(21,101,192,0.12);
+}
+
+/* Disolver .btn-row para que sus hijos participen directo en el flex padre */
+.btn-row {
+  display: contents;
 }
 
 #user-input {
-  width: 100%;
-  border: 1.5px solid var(--border);
-  border-radius: 10px;
-  padding: 13px 18px;
+  flex: 1 1 200px;
+  order: 1;
+  border: none;
+  border-radius: 0;
+  padding: 10px 0;
   font-size: 0.95rem;
   font-family: 'Nunito', sans-serif;
   outline: none;
-  transition: border-color 0.2s;
-  background: #fafbfd;
+  background: transparent;
+  min-width: 0;
 }
 
-#user-input:focus { border-color: var(--sac-blue); }
-#user-input::placeholder { color: #aab; }
-
-.btn-row {
-  display: flex;
-  gap: 10px;
-}
+#user-input::placeholder { color: #b0b8c8; }
 
 .btn {
-  flex: 1;
-  padding: 13px;
   border: none;
-  border-radius: 10px;
+  border-radius: 12px;
   font-weight: 800;
   font-family: 'Nunito', sans-serif;
-  font-size: 0.95rem;
+  font-size: 0.88rem;
   cursor: pointer;
   transition: opacity 0.15s, transform 0.13s;
+  white-space: nowrap;
 }
 
 .btn:active { transform: scale(0.97); }
-.btn:disabled { opacity: 0.55; cursor: not-allowed; }
-
-.btn-reset {
-  background: var(--sac-orange);
-  color: white;
-}
-
-.btn-reset.hidden { display: none; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .btn-send {
+  flex: 0 0 auto;
+  order: 2;
+  padding: 10px 22px;
   background: var(--sac-blue);
   color: white;
 }
+
+.btn-reset {
+  flex: 1 1 100%;
+  order: 3;
+  padding: 10px;
+  background: transparent;
+  color: var(--muted);
+  border: 1.5px solid var(--border);
+  font-size: 0.82rem;
+}
+
+.btn-reset:hover { background: #f5f5f5; color: var(--text); }
+.btn-reset.hidden { display: none; }
 
 /* ── Error con reintento ───────────────────────────────────────── */
 
@@ -397,3 +422,39 @@ main {
 .table-fade-in {
   animation: tableFadeIn 0.3s ease-out forwards;
 }
+
+/* ── Tabla: wrapper con toolbar de exportación ─────────────────── */
+
+.table-outer-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+/* ── Gráfico: toolbar y botón de exportación ───────────────────── */
+
+.chart-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 4px 0;
+}
+
+.chart-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: var(--sac-blue);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.12s;
+}
+
+.chart-export-btn:hover  { opacity: 0.85; }
+.chart-export-btn:active { transform: scale(0.96); }

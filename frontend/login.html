@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TIARA — Acceso</title>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --blue: #003274;
+  --orange: #FF650A;
+  --bg: #f0f2f5;
+  --white: #ffffff;
+  --border: #d8dde6;
+  --muted: #666;
+  --error: #c0392b;
+}
+body {
+  font-family: 'Nunito', sans-serif;
+  background: var(--bg);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.card {
+  background: var(--white);
+  border-radius: 20px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.12);
+  padding: 20px 44px 40px;
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+.title {
+  align-self: center;
+  text-align: center;
+  font-size: 3rem;
+  font-weight: 900;
+  letter-spacing: -1px;
+  line-height: 1;
+  margin-top: 10px;
+  width: 100%;
+}
+.made-by {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+  margin-top: -8px;
+}
+.t-blue    { color: var(--blue); }
+.t-celeste { color: #0096B9; }
+.t-orange  { color: var(--orange); }
+form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+label { font-size: 0.82rem; font-weight: 700; color: var(--muted); }
+input {
+  width: 100%;
+  padding: 12px 16px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-family: 'Nunito', sans-serif;
+  outline: none;
+  background: #fafbfd;
+  transition: border-color 0.2s;
+}
+input:focus { border-color: var(--blue); }
+button {
+  width: 100%;
+  padding: 13px;
+  background: var(--blue);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 1rem;
+  font-weight: 800;
+  font-family: 'Nunito', sans-serif;
+  cursor: pointer;
+  margin-top: 4px;
+  transition: opacity 0.15s, transform 0.12s;
+}
+button:hover { opacity: 0.88; }
+button:active { transform: scale(0.98); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+.error-msg {
+  color: var(--error);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+  display: none;
+}
+.error-msg.visible { display: block; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="title"><span class="t-blue">TI</span><span class="t-celeste">A</span><span class="t-orange">RA</span></div>
+
+  <form id="login-form">
+    <div>
+      <label for="username">Usuario</label>
+      <input type="text" id="username" autocomplete="username" placeholder="Usuario" required>
+    </div>
+    <div>
+      <label for="password">Contraseña</label>
+      <input type="password" id="password" autocomplete="current-password" placeholder="Contraseña" required>
+    </div>
+    <p class="error-msg" id="error-msg">Credenciales incorrectas. Intenta de nuevo.</p>
+    <button type="submit" id="login-btn">Iniciar sesión</button>
+  </form>
+
+  <p class="made-by">Creado por SAC</p>
+</div>
+
+<script>
+  // Si ya hay token válido, redirigir al chat
+  const token = localStorage.getItem("tiara_token");
+  if (token) window.location.href = "/";
+
+  document.getElementById("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("login-btn");
+    const errorMsg = document.getElementById("error-msg");
+    btn.disabled = true;
+    btn.textContent = "Iniciando...";
+    errorMsg.classList.remove("visible");
+
+    const username = document.getElementById("username").value.trim();
+    const password = document.getElementById("password").value;
+
+    try {
+      const resp = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        localStorage.setItem("tiara_token", data.access_token);
+        window.location.href = "/";
+      } else {
+        errorMsg.classList.add("visible");
+        btn.disabled = false;
+        btn.textContent = "Iniciar sesión";
+      }
+    } catch {
+      errorMsg.textContent = "Error de conexión. Intenta de nuevo.";
+      errorMsg.classList.add("visible");
+      btn.disabled = false;
+      btn.textContent = "Iniciar sesión";
+    }
+  });
+</script>
+</body>
+</html>

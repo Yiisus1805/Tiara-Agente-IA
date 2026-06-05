@@ -51,6 +51,7 @@ MAX_RESPONSE_CACHE_LEN = 100_000
 
 CHART_SENTINEL = "\x00CHART\x00"
 ERROR_RETRY_SENTINEL = "\x00ERROR_RETRY\x00"
+TABLE_FLUSH_SENTINEL = "\x00TABLE_FLUSH\x00"  # indica que no viene chart: emitir tabla ya
 AGENT_STEP_TIMEOUT = float(os.getenv("AGENT_STEP_TIMEOUT", "90"))
 
 logging.basicConfig(
@@ -634,6 +635,66 @@ async def _generate_analysis(question: str, data_rows: list, columns: list) -> s
         return ""
 
 
+async def _stream_analysis(question: str, data_rows: list, columns: list):
+    """Genera análisis en streaming — yields tokens a medida que llegan del LLM."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    if not api_key:
+        return
+
+    rows_preview = data_rows[:10]
+    if len(columns) == 1 and len(rows_preview) == 1:
+        col = columns[0]
+        val = _format_cell(rows_preview[0].get(col), col)
+        data_str = f"{col}: {val}"
+    else:
+        data_str = " | ".join(columns) + "\n"
+        for r in rows_preview:
+            data_str += " | ".join(_format_cell(r.get(c), c) for c in columns) + "\n"
+
+    prompt = (
+        f"Pregunta del usuario: {question}\n\n"
+        f"Datos obtenidos:\n{data_str}\n\n"
+        "Escribe UN párrafo en español (2-3 oraciones) respondiendo la pregunta con los datos de arriba.\n"
+        "REGLAS ESTRICTAS:\n"
+        "- Nombra EXACTAMENTE los valores que aparecen en los datos (nombres de territorios, productos, "
+        "clientes, años, porcentajes, montos, etc.).\n"
+        "- NUNCA uses frases vagas como 'el especificado en la consulta', 'los datos muestran', "
+        "'según los resultados', 'el territorio analizado'. Si tienes el nombre, úsalo.\n"
+        "- Si hay un número ganador (mejor, mayor, top), menciónalo primero.\n"
+        "- NÚMEROS: usa SIEMPRE coma como separador de miles y punto como decimal: 16,351,550.34.\n"
+        "- Sin markdown, bullets ni encabezados. Solo texto narrativo directo."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            async with client.stream(
+                "POST",
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "max_tokens": 200,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": True,
+                },
+            ) as response:
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(payload)["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            yield delta
+                    except Exception:
+                        pass
+    except Exception:
+        logger.exception("Error en stream de análisis")
+
+
 # SQL Cache
 
 def _init_sql_cache(base_persist_dir: str):
@@ -1161,6 +1222,175 @@ def _merge_multiple_tables(html_chunks: list[str]) -> str:
 
 # RAG
 
+# ── PREDICCIÓN / PROYECCIÓN ───────────────────────────────────────────────────
+
+# Años futuros respecto al dataset (AdventureWorks termina en 2014)
+_FUTURE_YEAR_RE = re.compile(r'\b(201[5-9]|20[2-9]\d)\b')
+
+
+_PREDICTION_SQL = """
+SELECT DD.CalendarYear, SUM(S.SalesAmount) AS TotalSales
+FROM (
+    SELECT OrderDateKey, SalesAmount FROM dbo.FactInternetSales
+    UNION ALL
+    SELECT OrderDateKey, SalesAmount FROM dbo.FactResellerSales
+) S
+JOIN dbo.DimDate DD ON S.OrderDateKey = DD.DateKey
+GROUP BY DD.CalendarYear
+ORDER BY DD.CalendarYear
+"""
+
+
+async def _run_prediction(question: str) -> tuple[str, dict]:
+    """Proyecta ventas futuras con regresión lineal sobre datos históricos.
+    Retorna (narrativa, chart_payload)."""
+    if not SQL_RUNNER:
+        return "No hay conexión a la base de datos disponible.", {}
+
+    year_match = _FUTURE_YEAR_RE.search(question)
+
+    try:
+        import numpy as np
+
+        df = await SQL_RUNNER.run_sql(RunSqlToolArgs(sql=_PREDICTION_SQL), None)
+
+        if df.empty or len(df) < 2:
+            return "No hay suficientes datos históricos para proyectar.", {}
+
+        years = df["CalendarYear"].astype(int).tolist()
+        sales = df["TotalSales"].astype(float).tolist()
+
+        # Excluir el último año si parece incompleto (< 10% del año anterior)
+        if len(sales) >= 2 and sales[-2] > 0 and (sales[-1] / sales[-2]) < 0.10:
+            logger.warning(
+                "Año %d parece incompleto ($%,.0f vs $%,.0f) — excluido de la proyección",
+                years[-1], sales[-1], sales[-2],
+            )
+            years = years[:-1]
+            sales = sales[:-1]
+
+        target_year = int(year_match.group()) if year_match else max(years) + 1
+
+        x = np.array(years, dtype=float)
+        y = np.array(sales, dtype=float)
+
+        # Regresión lineal
+        slope, intercept = np.polyfit(x, y, 1)
+        projected_linear = float(slope * target_year + intercept)
+
+        # Tasa de crecimiento mediana año-a-año (más robusta que CAGR extremo-a-extremo)
+        yoy_rates = [
+            (y[i] - y[i - 1]) / y[i - 1]
+            for i in range(1, len(y))
+            if y[i - 1] > 0
+        ]
+        median_yoy = float(np.median(yoy_rates)) if yoy_rates else 0.0
+        years_ahead = max(1, target_year - int(max(years)))
+        projected_yoy = float(y[-1] * (1 + median_yoy) ** years_ahead)
+        growth_pct = median_yoy * 100
+
+        projected = (projected_linear + projected_yoy) / 2.0
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        model   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        narrative = ""
+        if api_key:
+            rows_txt = "\n".join(f"{yr}: ${sl:,.0f}" for yr, sl in zip(years, sales))
+            prompt = (
+                f"Datos de ventas históricas (todas las fuentes combinadas):\n{rows_txt}\n\n"
+                f"Proyección para {target_year}:\n"
+                f"  - Regresión lineal: ${projected_linear:,.0f}\n"
+                f"  - Crecimiento mediano anual ({growth_pct:.1f}%): ${projected_yoy:,.0f}\n"
+                f"  - Estimación promedio: ${projected:,.0f}\n\n"
+                f"Pregunta del usuario: {question}\n\n"
+                "Escribe UN párrafo en español (3-4 oraciones) respondiendo la pregunta con los datos de arriba. "
+                "Si la pregunta es sobre ventas totales: menciona el crecimiento mediano anual, los años base "
+                "y la estimación final. "
+                "Si la pregunta es sobre un producto, región u otra dimensión específica: explica amablemente "
+                "que esta proyección es para ventas totales y que no es posible predecir con precisión qué "
+                "producto o dimensión específica liderará en el futuro, pero sí se puede ver cuál lideró "
+                "históricamente. "
+                "NÚMEROS: usa coma para miles y punto para decimal (1,234,567.89). Sin markdown."
+            )
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={
+                            "model": model,
+                            "max_tokens": 250,
+                            "messages": [{"role": "user", "content": prompt}],
+                        },
+                    )
+                    narrative = resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception:
+                logger.exception("Error generando narrativa de proyección")
+
+        if not narrative:
+            narrative = (
+                f"Con base en las ventas históricas de {years[0]} a {years[-1]} "
+                f"(CAGR del {growth_pct:.1f}% anual), se proyecta que las ventas totales "
+                f"para {target_year} alcanzarían aproximadamente ${projected:,.0f}. "
+                "Esta es una proyección estadística basada en tendencias pasadas."
+            )
+
+        # Gráfico: barras históricas (azul) + barra de proyección (naranja)
+        chart_years = [str(yr) for yr in years] + [str(target_year)]
+        hist_data   = [round(s, 2) for s in sales] + [None]
+        proj_data   = [None] * len(years) + [round(projected, 2)]
+
+        chart_payload = {
+            "backgroundColor": "transparent",
+            "animation": True,
+            "animationDuration": 900,
+            "animationEasing": "cubicOut",
+            "grid": {"left": "3%", "right": "4%", "bottom": "18%", "top": "8%", "containLabel": True},
+            "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+            "legend": {"data": ["Histórico", f"Proyección {target_year}"], "bottom": 0, "textStyle": {"color": "#333"}},
+            "xAxis": {
+                "type": "category", "data": chart_years,
+                "axisLabel": {"fontSize": 11, "color": "#333"},
+                "axisLine": {"lineStyle": {"color": "#ccc"}},
+            },
+            "yAxis": {"type": "value", "axisLabel": {"fontSize": 11, "color": "#333"}},
+            "series": [
+                {
+                    "name": "Histórico", "type": "bar", "data": hist_data,
+                    "barMaxWidth": 52,
+                    "itemStyle": {
+                        "borderRadius": [5, 5, 0, 0],
+                        "color": {"type": "linear", "x": 0, "y": 0, "x2": 0, "y2": 1,
+                                  "colorStops": [{"offset": 0, "color": "#4A90D9"},
+                                                 {"offset": 1, "color": "#1a5276"}]},
+                    },
+                },
+                {
+                    "name": f"Proyección {target_year}", "type": "bar", "data": proj_data,
+                    "barMaxWidth": 52,
+                    "itemStyle": {
+                        "borderRadius": [5, 5, 0, 0],
+                        "color": {"type": "linear", "x": 0, "y": 0, "x2": 0, "y2": 1,
+                                  "colorStops": [{"offset": 0, "color": "#F39C12"},
+                                                 {"offset": 1, "color": "#9a7d0a"}]},
+                    },
+                    "emphasis": {"itemStyle": {"opacity": 0.82}},
+                },
+            ],
+        }
+
+        logger.info(
+            "Proyección para %d: $%s (lineal: $%s, mediana YoY: $%s)",
+            target_year,
+            f"{projected:,.0f}", f"{projected_linear:,.0f}", f"{projected_yoy:,.0f}",
+        )
+        return narrative, chart_payload
+
+    except Exception:
+        logger.exception("Error ejecutando proyección")
+        return "No se pudo calcular la proyección. Intenta de nuevo.", {}
+
+
 DISCOVERY_KEYWORDS = [
     "qué tablas", "que tablas", "tablas disponibles", "vistas disponibles",
     "tablas y vistas", "lista de tablas", "muestra las tablas", "muéstrame las tablas",
@@ -1177,8 +1407,89 @@ def _is_discovery_question(message: str) -> bool:
 # Determina si el mensaje requiere SQL o es conversación general.
 # Usa el LLM con max_tokens=5 para ser robusto ante cualquier formulación.
 
+_DISCOVERY_SQL = """
+SELECT
+    t.name                          AS Tabla,
+    SUM(ps.row_count)               AS Registros
+FROM sys.tables t
+JOIN sys.dm_db_partition_stats ps
+     ON t.object_id = ps.object_id AND ps.index_id IN (0, 1)
+WHERE t.is_ms_shipped = 0
+GROUP BY t.name
+ORDER BY t.name
+"""
+
+
+async def _run_discovery(question: str = "") -> tuple[str, str]:
+    """Consulta nombres de tablas y cantidad de registros reales de la BD.
+    Aplica ordenamiento y límite según lo que el usuario pidió.
+    Retorna (html_tabla, texto_resumen)."""
+    if not SQL_RUNNER:
+        return "", "No hay conexión a la base de datos disponible."
+    try:
+        df = await SQL_RUNNER.run_sql(RunSqlToolArgs(sql=_DISCOVERY_SQL), None)
+        if df.empty:
+            return "", "No se encontraron tablas en la base de datos."
+
+        total_tables = len(df)
+        total_records = int(df["Registros"].sum())
+
+        # Determinar orden según la pregunta
+        q = question.lower()
+        sort_desc = any(w in q for w in [
+            "más registros", "mayor", "más grande", "top", "mayor cantidad",
+            "más datos", "más filas", "más grande"
+        ])
+        sort_asc = any(w in q for w in [
+            "menos registros", "menor", "más pequeña", "menos datos", "menos filas"
+        ])
+
+        if sort_desc:
+            df = df.sort_values("Registros", ascending=False).reset_index(drop=True)
+        elif sort_asc:
+            df = df.sort_values("Registros", ascending=True).reset_index(drop=True)
+
+        # Extraer límite numérico de la pregunta (ej. "10", "5")
+        import re as _re
+        num_match = _re.search(r'\b(\d+)\b', q)
+        limit = int(num_match.group(1)) if num_match else None
+        if limit and 1 <= limit < total_tables:
+            df = df.head(limit)
+
+        cols = df.columns.tolist()
+        rows = df.to_dict("records")
+
+        html = ['<table class="data-table"><thead><tr>']
+        for col in cols:
+            html.append(f'<th>{_safe_str(col)}</th>')
+        html.append('</tr></thead><tbody>')
+        for r in rows:
+            html.append('<tr>')
+            for c in cols:
+                html.append(f'<td>{_format_cell(r.get(c, ""), c)}</td>')
+            html.append('</tr>')
+        html.append('</tbody></table>')
+
+        shown = len(rows)
+        if shown < total_tables:
+            summary = (
+                f"Mostrando {shown} de {total_tables} tablas "
+                f"(total de registros en la BD: {total_records:,})."
+            )
+        else:
+            summary = (
+                f"La base de datos contiene {total_tables} tablas "
+                f"con un total de {total_records:,} registros."
+            )
+        logger.info("Discovery: mostrando %d/%d tablas", shown, total_tables)
+        return "\n".join(html), summary
+    except Exception:
+        logger.exception("Error ejecutando discovery de tablas")
+        return "", "No se pudo consultar la estructura de la base de datos."
+
+
 async def _classify_intent(message: str) -> str:
-    """Retorna 'SQL' si el mensaje requiere una consulta de datos, 'CHAT' en caso contrario."""
+    """Retorna 'SQL', 'PREDICTION', 'DISCOVERY' o 'CHAT' según el tipo de mensaje."""
     api_key = os.getenv("OPENAI_API_KEY")
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     if not api_key:
@@ -1191,20 +1502,28 @@ async def _classify_intent(message: str) -> str:
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
                     "model": model,
-                    "max_tokens": 5,
+                    "max_tokens": 10,
                     "temperature": 0,
                     "messages": [
                         {
                             "role": "system",
                             "content": (
-                                "Clasifica el mensaje del usuario en UNA de estas dos categorías:\n"
-                                "SQL — el usuario quiere datos, métricas, reportes, análisis de ventas, "
-                                "productos, clientes, empleados, territorios, fechas, rankings, gráficos, "
-                                "comparaciones, tendencias o cualquier consulta sobre la base de datos.\n"
+                                "Clasifica el mensaje del usuario en UNA de estas cuatro categorías:\n"
+                                "DISCOVERY — el usuario quiere ver qué tablas existen en la base de datos, "
+                                "cuántos registros tiene cada tabla, qué contiene la BD, qué datos hay disponibles, "
+                                "la estructura o el contenido general de la base de datos.\n"
+                                "SQL — el usuario quiere datos históricos reales: ventas pasadas, métricas, "
+                                "rankings, comparaciones, productos, clientes, empleados, territorios, "
+                                "tendencias pasadas, gráficos de datos existentes.\n"
+                                "PREDICTION — el usuario pregunta por ventas TOTALES GLOBALES en el futuro "
+                                "SIN filtrar por país, región, producto, categoría ni ninguna dimensión: "
+                                "'¿cuánto se venderá en total en 2015?', '¿cuáles serán las ventas totales?'. "
+                                "Si menciona un país (Australia, Francia, USA...), región, producto, empleado "
+                                "o cualquier categoría específica → SQL, NO PREDICTION. "
+                                "Si pregunta qué producto/región/empleado liderará en el futuro → SQL.\n"
                                 "CHAT — el usuario saluda, agradece, se despide, pregunta qué eres, "
-                                "qué puedes hacer, cómo funcionas, si puedes responder algo, "
-                                "o hace cualquier pregunta general que NO requiere consultar datos.\n"
-                                "Responde ÚNICAMENTE con la palabra SQL o CHAT."
+                                "qué puedes hacer, cómo funcionas, o hace preguntas fuera del dominio de datos.\n"
+                                "Responde ÚNICAMENTE con la palabra SQL, PREDICTION, DISCOVERY o CHAT."
                             ),
                         },
                         {"role": "user", "content": message},
@@ -1212,7 +1531,14 @@ async def _classify_intent(message: str) -> str:
                 },
             )
             result = resp.json()["choices"][0]["message"]["content"].strip().upper()
-            intent = "SQL" if "SQL" in result else "CHAT"
+            if "DISCOVERY" in result:
+                intent = "DISCOVERY"
+            elif "PREDICTION" in result:
+                intent = "PREDICTION"
+            elif "CHAT" in result:
+                intent = "CHAT"
+            else:
+                intent = "SQL"
             logger.info("Clasificación de intención: '%s' → %s", message[:60], intent)
             return intent
     except Exception:
@@ -1239,11 +1565,16 @@ async def _get_chat_response(message: str) -> str:
                         {
                             "role": "system",
                             "content": (
-                                "Eres TIARA, un asistente analítico especializado en datos de ventas de AdventureWorks. "
-                                "Puedes responder preguntas sobre ventas por región, producto, cliente, empleado, "
-                                "canal (internet o revendedor), territorio, tendencias temporales y rankings. "
-                                "NO tienes acceso a datos externos ni puedes hacer predicciones fuera de los datos históricos. "
-                                "Responde de forma breve, amigable y en español. Sin markdown ni bullets. Solo texto natural."
+                                "Eres TIARA, un asistente de análisis de datos. "
+                                "Solo puedes hacer dos cosas:\n"
+                                "1. Responder saludos, despedidas y agradecimientos de forma breve y amigable.\n"
+                                "2. Explicar brevemente qué tipo de preguntas puedes responder "
+                                "(ventas, productos, clientes, territorios, empleados, tendencias — "
+                                "todo basado en la base de datos proporcionada).\n"
+                                "Para CUALQUIER otra cosa (chistes, preguntas generales, temas externos, "
+                                "opiniones, etc.), responde EXACTAMENTE: "
+                                "'Solo puedo ayudarte a responder preguntas de la base de datos proporcionada.'\n"
+                                "Sin markdown ni bullets. Solo texto natural en español."
                             ),
                         },
                         {"role": "user", "content": message},
@@ -1253,7 +1584,7 @@ async def _get_chat_response(message: str) -> str:
             return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception:
         logger.exception("Error generando respuesta conversacional")
-        return "¡Hola! Soy TIARA, tu asistente de análisis de datos. ¿En qué puedo ayudarte hoy?"
+        return "Solo puedo ayudarte a responder preguntas de la base de datos proporcionada."
 
 
 def _filter_and_deduplicate(hits: list) -> list:
@@ -1354,7 +1685,11 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "  o filtra con: WHERE DD.CalendarYear IN (SELECT DISTINCT CalendarYear FROM dbo.DimDate)\n"
         "- Para comparaciones 'año a año' → usa los años presentes en DimDate, "
         "    haciendo JOIN de la tabla consigo misma por CalendarYear y CalendarYear+1.\n"
-        "- Para 'último año disponible' → usa: (SELECT MAX(CalendarYear) FROM dbo.DimDate)\n\n"
+        "- Para 'último año disponible' → usa: (SELECT MAX(CalendarYear) FROM dbo.DimDate)\n"
+        "- CRÍTICO: Si el usuario menciona un año futuro (ej. 2015, 2016) que puede no existir "
+        "en los datos, NUNCA filtres directamente por ese año. Usa siempre el último año disponible:\n"
+        "    WHERE DD.CalendarYear = (SELECT MAX(CalendarYear) FROM dbo.DimDate)\n"
+        "  y menciona en tu respuesta que estás usando el último año con datos disponibles.\n\n"
         "FUENTE DE VENTAS (CRÍTICO — regla absoluta):\n"
         "Las ventas totales = FactInternetSales + FactResellerSales combinadas.\n"
         "SIEMPRE incluye en el UNION ALL TODAS las columnas que necesitarás para JOINs posteriores.\n"
@@ -1380,11 +1715,14 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "el GROUP BY debe ser SOLO por la columna de la dimensión (ej: SalesTerritoryRegion).\n"
         "NUNCA incluyas columnas de AllSales en el GROUP BY final salvo que el usuario pida desglose por canal.\n"
         "Ejemplo CORRECTO (porcentaje por región):\n"
-        "  SELECT DST.SalesTerritoryRegion, SUM(AS.SalesAmount) * 100.0 / SUM(SUM(AS.SalesAmount)) OVER() AS Percentage\n"
-        "  FROM AllSales AS JOIN DimSalesTerritory DST ON AS.SalesTerritoryKey = DST.SalesTerritoryKey\n"
+        "  SELECT DST.SalesTerritoryRegion,\n"
+        "         SUM(AllSales.SalesAmount) * 100.0 / SUM(SUM(AllSales.SalesAmount)) OVER() AS Percentage\n"
+        "  FROM AllSales\n"
+        "  JOIN dbo.DimSalesTerritory DST ON AllSales.SalesTerritoryKey = DST.SalesTerritoryKey\n"
         "  GROUP BY DST.SalesTerritoryRegion  ← SOLO la dimensión\n"
         "  ORDER BY Percentage DESC\n"
-        "Ejemplo INCORRECTO: GROUP BY DST.SalesTerritoryRegion, AS.SalesTerritoryKey ← produce filas duplicadas\n\n"
+        "CRÍTICO: NUNCA uses 'AS' como alias de tabla (es palabra reservada). Referencia AllSales directamente.\n"
+        "Ejemplo INCORRECTO: GROUP BY DST.SalesTerritoryRegion, AllSales.SalesTerritoryKey ← produce filas duplicadas\n\n"
         "Excepción: usa SOLO FactInternetSales si el usuario dice 'online', 'internet' o 'canal directo'.\n"
         "Excepción: usa SOLO FactResellerSales si el usuario dice 'reseller', 'distribuidor' o 'canal indirecto'.\n"
         "NUNCA uses FactResellerSalesXL_PageCompressed ni FactResellerSalesXL_CCI.\n\n"
@@ -1484,12 +1822,27 @@ async def run_agent_stream_text(
 
     original_question = message
 
-    # 0. Clasificar intención — si no es una consulta de datos, responder sin agente SQL
+    # 0. Clasificar intención — enruta a SQL, proyección, discovery o conversación
     if not retry:
         intent = await _classify_intent(original_question)
         if intent == "CHAT":
-            chat_response = await _get_chat_response(original_question)
-            yield chat_response
+            yield await _get_chat_response(original_question)
+            return
+        if intent == "PREDICTION":
+            logger.info("Pregunta predictiva detectada — ejecutando proyección estadística")
+            narrative, chart_payload = await _run_prediction(original_question)
+            if narrative:
+                yield narrative
+            if chart_payload:
+                yield CHART_SENTINEL + json.dumps(chart_payload)
+            return
+        if intent == "DISCOVERY":
+            logger.info("Discovery detectado — consultando tablas y registros de la BD")
+            table_html, summary = await _run_discovery(original_question)
+            if table_html:
+                yield table_html
+            if summary:
+                yield summary
             return
 
     # En reintento forzamos SQL fresco evictando la entrada cacheada
@@ -1590,6 +1943,8 @@ async def run_agent_stream_text(
     tabla_chunks: list[str] = []
     post_table_chunks: list[str] = []
     table_seen = False
+    meaningful_post_analysis = False  # True cuando se emitió análisis sustancial (>20 chars)
+    response_chunks: list[str] = []
 
     agen = agent.send_message(
         request_context=request_context,
@@ -1611,12 +1966,18 @@ async def run_agent_stream_text(
             if not text_output:
                 continue
 
-            is_table = '<table' in text_output
-            if is_table:
+            if '<table' in text_output:
                 table_seen = True
                 tabla_chunks.append(text_output)
             elif table_seen:
-                post_table_chunks.append(text_output)
+                # Texto post-tabla: emitir inmediatamente si no es vago
+                if not _is_vague_analysis(text_output):
+                    post_table_chunks.append(text_output)
+                    response_chunks.append(text_output)
+                    yield text_output
+                    if len(text_output.strip()) > 20:
+                        meaningful_post_analysis = True
+                # si es vago o trivial: el fallback lo reemplazará
             else:
                 pre_table_buffer.append(text_output)
 
@@ -1629,41 +1990,42 @@ async def run_agent_stream_text(
 
     # 5. Emitir respuesta
     logger.info(
-        "Buffers — pre_table:%d tabla:%d post_table:%d",
-        len(pre_table_buffer), len(tabla_chunks), len(post_table_chunks),
+        "Buffers — pre_table:%d tabla:%d post_table:%d meaningful=%s",
+        len(pre_table_buffer), len(tabla_chunks), len(post_table_chunks), meaningful_post_analysis,
     )
-    if post_table_chunks:
-        logger.info("post_table_chunks[0][:120]: %s", post_table_chunks[0][:120])
-    elif table_seen:
+    if not post_table_chunks and table_seen:
         logger.warning("Tabla encontrada pero post_table_chunks está vacío — el LLM no generó análisis posterior")
-
-    response_chunks: list[str] = []
 
     if table_seen and tabla_chunks:
         merged_table = _merge_multiple_tables(tabla_chunks) if len(tabla_chunks) > 1 else tabla_chunks[0]
         response_chunks.append(merged_table)
+
+        # Si no viene gráfico, la tabla debe aparecer ANTES del análisis
+        is_chart = _is_chart_question(original_question)
+        if not is_chart:
+            yield TABLE_FLUSH_SENTINEL  # señal para app.py: emitir tabla ya
         yield merged_table
 
-        combined_post = " ".join(post_table_chunks)
-        if post_table_chunks and not _is_vague_analysis(combined_post):
-            for chunk in post_table_chunks:
-                response_chunks.append(chunk)
-                yield chunk
+        if meaningful_post_analysis:
+            # Análisis sustancial ya emitido en el loop; solo registrar para cache
+            pass
         elif captured_sql and SQL_RUNNER:
+            # Sin análisis sustancial (vacío, trivial o vago): streaming fallback
             if post_table_chunks:
-                logger.warning("Análisis del LLM detectado como vago — reemplazando con fallback")
+                logger.warning("Análisis del LLM trivial/vago — reemplazando con fallback streaming")
             best_sql = captured_sql[-1]
             try:
-                tool_args = RunSqlToolArgs(sql=best_sql)
-                df = await SQL_RUNNER.run_sql(tool_args, None)
+                df = await SQL_RUNNER.run_sql(RunSqlToolArgs(sql=best_sql), None)
                 if not df.empty:
                     cols = df.columns.tolist()
                     rows = df.to_dict("records")
-                    analysis = await _generate_analysis(original_question, rows, cols)
-                    if analysis:
-                        response_chunks.append(analysis)
-                        yield analysis
-                        logger.info("Análisis de respaldo generado correctamente")
+                    analysis_text = ""
+                    async for token in _stream_analysis(original_question, rows, cols):
+                        analysis_text += token
+                        yield token
+                    if analysis_text:
+                        response_chunks.append(analysis_text)
+                        logger.info("Análisis de respaldo (streaming) generado correctamente")
             except Exception:
                 logger.exception("Error generando análisis de respaldo")
     elif captured_sql and SQL_RUNNER:
@@ -1736,13 +2098,17 @@ async def run_agent_stream_text(
                     html.append('</tbody></table>')
                     table_html = "\n".join(html)
                     response_chunks.append(table_html)
+                    if not _is_chart_question(original_question):
+                        yield TABLE_FLUSH_SENTINEL
                     yield table_html
 
-                analysis = await _generate_analysis(original_question, rows, cols)
-                if analysis:
-                    response_chunks.append(analysis)
-                    yield analysis
-                    logger.info("Fallback completo emitido correctamente")
+                analysis_text = ""
+                async for token in _stream_analysis(original_question, rows, cols):
+                    analysis_text += token
+                    yield token
+                if analysis_text:
+                    response_chunks.append(analysis_text)
+                    logger.info("Fallback completo (streaming) emitido correctamente")
             else:
                 msg = "La consulta no devolvió resultados."
                 response_chunks.append(msg)
@@ -1760,13 +2126,14 @@ async def run_agent_stream_text(
                 if not df.empty:
                     cols = df.columns.tolist()
                     rows = df.to_dict("records")
-                    analysis = await _generate_analysis(original_question, rows, cols)
-                    if analysis:
-                        response_chunks.append(analysis)
-                        yield analysis
-                        logger.info("Análisis de reemplazo generado correctamente")
-                        # reemplazar también en pre_table_buffer para el cache
-                        pre_table_buffer[:] = [analysis]
+                    analysis_text = ""
+                    async for token in _stream_analysis(original_question, rows, cols):
+                        analysis_text += token
+                        yield token
+                    if analysis_text:
+                        response_chunks.append(analysis_text)
+                        pre_table_buffer[:] = [analysis_text]
+                        logger.info("Análisis de reemplazo (streaming) generado correctamente")
             except Exception:
                 logger.exception("Error regenerando análisis desde texto vago")
                 for chunk in pre_table_buffer:

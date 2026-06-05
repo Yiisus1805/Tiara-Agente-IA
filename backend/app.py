@@ -4,15 +4,18 @@ import json
 import os
 import traceback
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from vanna.core.user import RequestContext
 
-from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL, ERROR_RETRY_SENTINEL
+from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL, ERROR_RETRY_SENTINEL, TABLE_FLUSH_SENTINEL
+from .auth import check_credentials, create_token, require_auth
+from .admin import router as admin_router
 
 
 agent = build_agent()
@@ -26,6 +29,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(admin_router)
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
@@ -42,6 +47,23 @@ def build_request_context(request: Request) -> RequestContext:
         remote_addr=request.client.host if request.client else None,
     )
 
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/login")
+async def login(body: LoginBody):
+    if not check_credentials(body.username, body.password):
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+    token = create_token(body.username)
+    return {"access_token": token, "token_type": "bearer"}
+
+
+# ── Páginas ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 async def health():
@@ -61,15 +83,25 @@ async def test_db():
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
+@app.get("/login")
+async def login_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "login.html"))
+
+
+@app.get("/admin")
+async def admin_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "admin.html"))
+
+
 @app.get("/")
 async def root():
-    index_path = os.path.join(FRONTEND_DIR, "index.html")
-    return FileResponse(index_path)
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
-# 🔥 SOLO STREAMING
+# ── Chat (protegido con JWT) ───────────────────────────────────────────────────
+
 @app.post("/api/tiara/chat_stream")
-async def tiara_chat_stream(request: Request):
+async def tiara_chat_stream(request: Request, _user: dict = Depends(require_auth)):
     try:
         body = await request.json()
         question = (body.get("question") or "").strip()
@@ -85,6 +117,13 @@ async def tiara_chat_stream(request: Request):
             try:
                 yield f"data: {json.dumps({'type': 'start'})}\n\n"
 
+                # Tablas se retienen hasta saber si viene un gráfico.
+                # TABLE_FLUSH_SENTINEL indica que no hay chart: emitir tabla inmediatamente.
+                # Si llega CHART_SENTINEL, descartar buffer.
+                table_buffer: list[str] = []
+                flush_tables = False  # True → emitir tablas ahora, no al final
+                chart_seen = False
+
                 async for chunk in run_agent_stream_text(
                     agent=agent,
                     request_context=ctx,
@@ -95,13 +134,24 @@ async def tiara_chat_stream(request: Request):
                     if chunk.startswith(ERROR_RETRY_SENTINEL):
                         msg = chunk[len(ERROR_RETRY_SENTINEL):]
                         yield f"data: {json.dumps({'type': 'error_retry', 'message': msg})}\n\n"
+                    elif chunk == TABLE_FLUSH_SENTINEL:
+                        flush_tables = True
                     elif chunk.startswith(CHART_SENTINEL):
+                        chart_seen = True
+                        table_buffer.clear()
                         chart_data = json.loads(chunk[len(CHART_SENTINEL):])
                         yield f"data: {json.dumps({'type': 'chart', 'data': chart_data})}\n\n"
                     elif '<table' in chunk:
-                        yield f"data: {json.dumps({'type': 'table', 'content': chunk})}\n\n"
+                        if flush_tables:
+                            yield f"data: {json.dumps({'type': 'table', 'content': chunk})}\n\n"
+                        else:
+                            table_buffer.append(chunk)
                     else:
                         yield f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
+
+                if not chart_seen:
+                    for t in table_buffer:
+                        yield f"data: {json.dumps({'type': 'table', 'content': t})}\n\n"
 
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -128,7 +178,5 @@ async def tiara_chat_stream(request: Request):
 
 
 @app.delete("/api/tiara/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    return JSONResponse(
-        {"status": "deleted", "conversation_id": conversation_id}
-    )
+async def delete_conversation(conversation_id: str, _user: dict = Depends(require_auth)):
+    return JSONResponse({"status": "deleted", "conversation_id": conversation_id})
