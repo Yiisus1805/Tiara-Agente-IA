@@ -197,8 +197,18 @@ async function streamIntoBubble(question, bubble, isRetry) {
   const tw = createTypewriter(bubble, chatContainer);
   let thinkingRemoved = false;
 
+  // Aviso de consulta lenta — aparece a los 10s si no hay respuesta aún
+  const slowTimer = setTimeout(() => {
+    if (!thinkingRemoved) {
+      const el = bubble.querySelector(".thinking");
+      if (el) el.innerHTML =
+        'Procesando consulta, esto puede tardar un momento<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
+    }
+  }, 10000);
+
   function removeThinking() {
     if (!thinkingRemoved) {
+      clearTimeout(slowTimer);
       const el = bubble.querySelector(".thinking");
       if (el) el.remove();
       thinkingRemoved = true;
@@ -299,6 +309,7 @@ async function streamIntoBubble(question, bubble, isRetry) {
     }
 
   } catch (err) {
+    clearTimeout(slowTimer);
     tw.flush();
     bubble.innerHTML = "Error conectando con Tiara.";
     sendBtn.disabled = false;
@@ -369,6 +380,19 @@ function renderPlotlyChart(bubble, chartData) {
 
   window.addEventListener("resize", () => chart.resize());
 }
+
+
+// Detección de conexión 
+
+const offlineBanner = document.getElementById("offline-banner");
+
+window.addEventListener("offline", () => {
+  offlineBanner.classList.add("visible");
+});
+
+window.addEventListener("online", () => {
+  offlineBanner.classList.remove("visible");
+});
 
 
 async function resetChat() {

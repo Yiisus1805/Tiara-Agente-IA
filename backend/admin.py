@@ -21,7 +21,7 @@ def _get_schema_store():
     return SCHEMA_STORE
 
 
-# ── SQL Cache ─────────────────────────────────────────────────────────────────
+# SQL Cache 
 
 @router.get("/sql-cache")
 async def list_sql_cache():
@@ -73,7 +73,7 @@ async def add_sql_cache(body: SqlCacheEntry):
     return {"status": "added"}
 
 
-# ── Schema Store ──────────────────────────────────────────────────────────────
+# Schema Store 
 
 @router.get("/schema-store")
 async def list_schema_store():
@@ -101,14 +101,14 @@ async def delete_schema_entry(entry_id: str):
     return {"status": "deleted", "id": entry_id}
 
 
-# ── Logs & Auditoría ─────────────────────────────────────────────────────────
+# Logs & Auditoría 
 
 @router.get("/logs/summary")
 async def logs_summary():
     return audit.get_summary()
 
 
-# ── Auth info ─────────────────────────────────────────────────────────────────
+# Auth info 
 
 @router.get("/me")
 async def me(user: dict = Depends(require_auth)):

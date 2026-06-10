@@ -50,7 +50,7 @@ def build_request_context(request: Request) -> RequestContext:
     )
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+#  Auth 
 
 class LoginBody(BaseModel):
     username: str
@@ -65,7 +65,7 @@ async def login(body: LoginBody):
     return {"access_token": token, "token_type": "bearer"}
 
 
-# ── Páginas ───────────────────────────────────────────────────────────────────
+# Páginas 
 
 @app.get("/api/health")
 async def health():
@@ -100,7 +100,7 @@ async def root():
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
-# ── Chat (protegido con JWT) ───────────────────────────────────────────────────
+# Chat (protegido con JWT) 
 
 @app.post("/api/tiara/chat_stream")
 async def tiara_chat_stream(request: Request, _user: dict = Depends(require_auth)):

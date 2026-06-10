@@ -464,6 +464,44 @@ async def _get_corrected_sql(question: str, bad_sql: str, problem: str) -> Optio
         return None
 
 
+def _validate_growth_structure(sql: str) -> list[str]:
+    """Detecta LAG/LEAD cuyo OVER ordena por columna no-temporal (produce crecimiento=0).
+
+    El error clásico: el CTE fuente agrega todos los años en una sola fila por
+    (territorio, categoría), luego LAG ordena por ese string en vez de por año.
+    Cada partición tiene exactamente una fila → LAG devuelve NULL → crecimiento = 0.
+    """
+    if not _WINDOW_REQUIRES_ORDER_BY.search(sql):
+        return []
+
+    errors: list[str] = []
+
+    def _check(m: re.Match) -> str:
+        content = m.group(1)
+        order_m = re.search(r'\bORDER\s+BY\s+(\w+)', content, re.IGNORECASE)
+        if not order_m:
+            return m.group(0)  # sin ORDER BY → _fix_window_order_by ya lo maneja
+
+        # Solo actuar si la función que precede a este OVER es LAG/LEAD/etc.
+        preceding = sql[max(0, m.start() - 300): m.start()]
+        if not _WINDOW_REQUIRES_ORDER_BY.search(preceding):
+            return m.group(0)
+
+        order_col = order_m.group(1)
+        if not _DATE_LIKE_COL.match(order_col):
+            errors.append(
+                f"LAG/LEAD tiene ORDER BY '{order_col}' que no es una columna temporal. "
+                "Para calcular crecimiento por período el ORDER BY del OVER debe ser una "
+                "columna de año/fecha (CalendarYear, OrderDateKey, etc.) y el CTE fuente "
+                "debe incluir esa columna en su GROUP BY. "
+                "Reescribe la consulta agrupando por año, territorio y categoría antes de aplicar LAG."
+            )
+        return m.group(0)
+
+    re.sub(r'\bOVER\s*\(([^()]*)\)', _check, sql, flags=re.IGNORECASE)
+    return errors
+
+
 # ── FIN VALIDACIÓN Y CORRECCIÓN ───────────────────────────────────────────────
 
 
@@ -490,6 +528,16 @@ class TrackingSqlTool(RunSqlTool):
                 corrected = await _get_corrected_sql(current_question, sql, problem)
                 if corrected and corrected != sql:
                     logger.info("SQL corregido por LLM antes de ejecutar")
+                    args = RunSqlToolArgs(sql=corrected)
+                    sql = corrected
+
+            growth_errors = _validate_growth_structure(sql)
+            if growth_errors and current_question and not join_errors:
+                problem = "; ".join(growth_errors)
+                logger.warning("Estructura de crecimiento inválida: %s — solicitando corrección al LLM", problem)
+                corrected = await _get_corrected_sql(current_question, sql, problem)
+                if corrected and corrected != sql:
+                    logger.info("SQL de crecimiento corregido por LLM antes de ejecutar")
                     args = RunSqlToolArgs(sql=corrected)
                     sql = corrected
 
@@ -694,6 +742,50 @@ async def _stream_analysis(question: str, data_rows: list, columns: list):
                         pass
     except Exception:
         logger.exception("Error en stream de análisis")
+
+
+async def _stream_no_results(question: str) -> AsyncGenerator[str, None]:
+    """Genera un mensaje contextual cuando la consulta no devuelve filas."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    model   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    if not api_key:
+        yield "No encontré datos para esa consulta. Intenta con un período o filtro diferente."
+        return
+
+    prompt = (
+        f"El usuario preguntó: \"{question}\"\n\n"
+        "La consulta SQL ejecutada no devolvió ningún resultado. "
+        "Escribe 2 oraciones en español explicando que no se encontraron datos y sugiriendo "
+        "qué podría cambiar el usuario para obtener resultados (diferente año, región, producto, etc.). "
+        "Sé específico con los filtros que mencionó el usuario. Sin markdown."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            async with client.stream(
+                "POST",
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "max_tokens": 120,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": True,
+                },
+            ) as response:
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(payload)["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            yield delta
+                    except Exception:
+                        pass
+    except Exception:
+        yield "No encontré datos para esa consulta. Intenta con un período o filtro diferente."
 
 
 # SQL Cache
@@ -1952,7 +2044,8 @@ async def run_agent_stream_text(
                                 logger.info("Gráfico ECharts generado desde cache")
                         return
                 else:
-                    yield "La consulta no devolvió resultados."
+                    async for token in _stream_no_results(original_question):
+                        yield token
                     return
             except Exception:
                 logger.exception("Error re-ejecutando SQL desde cache, continuando con flujo normal")
@@ -2168,9 +2261,8 @@ async def run_agent_stream_text(
                     response_chunks.append(analysis_text)
                     logger.info("Fallback completo (streaming) emitido correctamente")
             else:
-                msg = "La consulta no devolvió resultados."
-                response_chunks.append(msg)
-                yield msg
+                async for token in _stream_no_results(original_question):
+                    yield token
         except Exception:
             logger.exception("Error en fallback de renderizado")
             yield ERROR_RETRY_SENTINEL + "Ocurrió un error al procesar los resultados."
