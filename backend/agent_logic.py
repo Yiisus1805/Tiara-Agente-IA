@@ -2123,6 +2123,12 @@ async def run_agent_stream_text(
     # 0. Clasificar intención — enruta a SQL, proyección, discovery o conversación
     if not retry:
         intent = await _classify_intent(original_question)
+        # Gráfico de seguimiento ("haz un gráfico con esos valores", "grafica eso"):
+        # el clasificador ve un mensaje sin contexto y lo manda a CHAT, pero el
+        # agente SQL SÍ tiene el historial de conversación y puede resolverlo.
+        if intent == "CHAT" and _is_chart_question(original_question):
+            logger.info("Reclasificado CHAT→SQL: petición de gráfico contextual")
+            intent = "SQL"
         _ctx_intent.set(intent)
         if intent == "CHAT":
             yield await _get_chat_response(original_question)
@@ -2163,8 +2169,10 @@ async def run_agent_stream_text(
         # Si es pregunta de gráfico y la respuesta cacheada no tiene tabla
         # (fue respuesta de 1 fila), ignorar caché y regenerar con RAG.
         if full_response and not has_temporals:
-            if is_chart and '<table' not in full_response:
-                logger.info("Cache HIT ignorado: pregunta de gráfico con respuesta sin tabla — regenerando")
+            if is_chart:
+                # Gráficos siempre re-ejecutan SQL: el payload ECharts no se guarda
+                # en full_response y sin él el frontend no renderiza el gráfico
+                logger.info("Cache HIT: pregunta de gráfico — re-ejecutando SQL para regenerar gráfico")
             else:
                 logger.info("Cache HIT con full_response")
                 if '<table' in full_response.lower() and '</table>' in full_response.lower():
