@@ -126,6 +126,13 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   const token = localStorage.getItem("tiara_token");
   if (token) window.location.href = "/";
 
+  // Mostrar aviso si la sesión expiró por inactividad
+  if (new URLSearchParams(window.location.search).get("reason") === "inactividad") {
+    const msg = document.getElementById("error-msg");
+    msg.textContent = "Tu sesión expiró por inactividad. Inicia sesión de nuevo.";
+    msg.classList.add("visible");
+  }
+
   document.getElementById("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = document.getElementById("login-btn");

@@ -11,6 +11,23 @@ function _handleUnauth() {
   window.location.href = "/login";
 }
 
+// ── Inactivity timeout (30 min) ──────────────────────────────────────────────
+const INACTIVITY_MS = 30 * 60 * 1000;
+let _inactivityTimer = null;
+
+function _resetInactivityTimer() {
+  clearTimeout(_inactivityTimer);
+  _inactivityTimer = setTimeout(() => {
+    localStorage.removeItem("tiara_token");
+    window.location.href = "/login?reason=inactividad";
+  }, INACTIVITY_MS);
+}
+
+["mousemove", "keydown", "click", "touchstart"].forEach(evt =>
+  document.addEventListener(evt, _resetInactivityTimer, { passive: true })
+);
+_resetInactivityTimer();
+
 let conversationId = crypto.randomUUID();
 let firstMessage = true;
 
