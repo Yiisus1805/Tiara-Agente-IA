@@ -315,6 +315,99 @@ def _sanitize_sql_aliases(sql: str) -> str:
     return sanitized
 
 
+# ── HARDENING: BLOQUEO DE SQL DESTRUCTIVO ────────────────────────────────────
+
+# Operaciones que modifican o destruyen datos — nunca deben ejecutarse
+_DESTRUCTIVE_SQL_RE = re.compile(
+    r'\b('
+    r'DELETE\b|'
+    r'UPDATE\b|'
+    r'INSERT\b|'
+    r'DROP\b|'
+    r'TRUNCATE\b|'
+    r'ALTER\b|'
+    r'MERGE\b|'
+    r'EXEC\b|'
+    r'EXECUTE\b|'
+    r'CREATE\b|'
+    r'GRANT\b|'
+    r'REVOKE\b|'
+    r'DENY\b'
+    r')',
+    re.IGNORECASE,
+)
+
+# Patrones de inyección SQL — solo casos realmente peligrosos
+# ';' y '--' solos son SQL válido; solo son peligrosos cuando van seguidos de comandos destructivos
+_INJECTION_RE = re.compile(
+    r'('
+    r';\s*\b(?:DELETE|DROP|UPDATE|INSERT|ALTER|TRUNCATE|EXEC(?:UTE)?|GRANT|REVOKE)\b|'  # multi-statement
+    r'\bOR\b\s+[\'"]?\s*[0-9\'"][^\w]|'          # OR 1=1 / OR '1'='1'
+    r'\bAND\b\s+[\'"]?\s*[0-9\'"][^\w]|'         # AND 1=1 / AND '1'='1'
+    r'\bxp_\w+|'                                   # xp_cmdshell y similares
+    r'\bsp_(?:executesql|oa\w+|cmdexec)\b|'        # stored procs de sistema peligrosos
+    r'\bWAITFOR\s+DELAY\b|'                        # time-based blind injection
+    r'\bOPENROWSET\b|\bOPENDATASOURCE\b|\bOPENQUERY\b'  # acceso externo
+    r')',
+    re.IGNORECASE,
+)
+
+# Intención destructiva sobre la BD — requiere verbo + objeto explícito de BD
+# NO captura: "datos actualizados", "cambió el valor", "modificaciones históricas"
+_DB_OBJECT = r'(?:registro|dato|fila|entrada|tabla|record)'
+_DESTRUCTIVE_INTENT_RE = re.compile(
+    r'\b('
+    # Eliminar/borrar + objeto de BD explícito
+    r'elimin[ae]r?\s+(?:el|la|los|las|este|ese|un|una|todos?|todas?)\s*' + _DB_OBJECT + r'|'
+    r'borr[ae]r?\s+(?:el|la|los|las|este|ese|un|una|todos?|todas?)\s*' + _DB_OBJECT + r'|'
+    r'suprim[ei]r?\s+(?:el|la|los|las|este|ese)\s*' + _DB_OBJECT + r'|'
+    # SQL keywords escritos en lenguaje natural con objeto de BD
+    r'drop\s+(?:la\s+)?tabla|'
+    r'delete\s+(?:de|from|el|la)\b|'
+    r'trunca[rt](?:e|ar)?\s+(?:la\s+)?tabla|'
+    # Insertar un registro nuevo (acepta "un nuevo registro", "un registro", "nueva fila")
+    r'insert[ae]r?\s+(?:un|una|nuevo|nueva)(?:\s+(?:nuevo|nueva))?\s*' + _DB_OBJECT + r'|'
+    r'agrega[r]?\s+(?:un|una|nuevo|nueva)(?:\s+(?:nuevo|nueva))?\s*' + _DB_OBJECT + r'|'
+    # Modificar/actualizar/cambiar + objeto de BD explícito (no pasado, no adjetivo)
+    r'(?:modific[ae]r?|actualiz[ae]r?|cambi[ae]r?|edit[ae]r?)\s+'
+    r'(?:el|la|los|las|un|una)\s*(?:' + _DB_OBJECT + r'|campo|valor\s+de\s+\w+)'
+    r')',
+    re.IGNORECASE,
+)
+
+_READONLY_REFUSAL = (
+    "Solo tengo acceso de lectura a la base de datos. "
+    "No puedo eliminar, modificar ni insertar registros. "
+    "Si necesitas hacer cambios en los datos, contacta al administrador del sistema."
+)
+
+
+def _check_sql_safety(sql: str) -> str | None:
+    """Retorna un mensaje de error si el SQL es destructivo o sospechoso, None si es seguro."""
+    destructive = _DESTRUCTIVE_SQL_RE.search(sql)
+    if destructive:
+        logger.error(
+            "SQL DESTRUCTIVO BLOQUEADO (keyword: %s): %.200s",
+            destructive.group(0).upper(), sql,
+        )
+        return f"Operación '{destructive.group(0).upper()}' bloqueada — TIARA es de solo lectura."
+
+    injection = _INJECTION_RE.search(sql)
+    if injection:
+        logger.error(
+            "POSIBLE INYECCIÓN SQL BLOQUEADA (patrón: %r): %.200s",
+            injection.group(0), sql,
+        )
+        return "Consulta bloqueada por contener patrones no permitidos."
+
+    return None
+
+
+def _has_destructive_intent(question: str) -> bool:
+    """Devuelve True si la pregunta expresa intención de modificar/eliminar datos."""
+    return bool(_DESTRUCTIVE_INTENT_RE.search(question))
+
+
 # ── VALIDACIÓN Y CORRECCIÓN DE SQL ───────────────────────────────────────────
 
 _JOIN_ON_RE = re.compile(
@@ -502,6 +595,29 @@ def _validate_growth_structure(sql: str) -> list[str]:
     return errors
 
 
+_YEAR_IN_QUESTION_RE = re.compile(r'\b(20\d{2}|19\d{2})\b')
+_YEAR_FILTER_IN_SQL_RE = re.compile(
+    r'\b(CalendarYear|OrderDateKey|ShipDateKey|DueDateKey|YEAR\s*\(|DimDate)\b',
+    re.IGNORECASE,
+)
+
+
+def _validate_temporal_filter(sql: str, question: str) -> list[str]:
+    """Detecta cuando la pregunta menciona un año pero el SQL no filtra por él."""
+    years = _YEAR_IN_QUESTION_RE.findall(question)
+    if not years:
+        return []
+    if _YEAR_FILTER_IN_SQL_RE.search(sql):
+        return []
+    year = years[0]
+    return [
+        f"La pregunta menciona el año {year} pero el SQL no tiene filtro temporal. "
+        f"Añade un JOIN a dbo.DimDate DD ON <FactTable>.OrderDateKey = DD.DateKey "
+        f"y filtra con WHERE DD.CalendarYear = {year}. "
+        "Sin este filtro la consulta suma todos los años y devuelve resultados incorrectos."
+    ]
+
+
 # ── FIN VALIDACIÓN Y CORRECCIÓN ───────────────────────────────────────────────
 
 
@@ -514,6 +630,10 @@ class TrackingSqlTool(RunSqlTool):
     async def execute(self, context, args):
         sql = getattr(args, "sql", None)
         if sql:
+            safety_error = _check_sql_safety(sql)
+            if safety_error:
+                raise RuntimeError(safety_error)
+
             sanitized = _sanitize_sql_aliases(sql)
             if sanitized != sql:
                 logger.info("SQL sanitizado — alias reservados reemplazados")
@@ -538,6 +658,17 @@ class TrackingSqlTool(RunSqlTool):
                 corrected = await _get_corrected_sql(current_question, sql, problem)
                 if corrected and corrected != sql:
                     logger.info("SQL de crecimiento corregido por LLM antes de ejecutar")
+                    args = RunSqlToolArgs(sql=corrected)
+                    sql = corrected
+
+            temporal_errors = _validate_temporal_filter(sql, current_question or "")
+            if temporal_errors and current_question and not join_errors:
+                problem = "; ".join(temporal_errors)
+                logger.warning("Filtro temporal ausente: %s — solicitando corrección al LLM", problem)
+                corrected = await _get_corrected_sql(current_question, sql, problem)
+                if corrected and corrected != sql:
+                    logger.info("SQL corregido con filtro temporal por LLM antes de ejecutar")
+                    _evict_sql_cache(current_question)
                     args = RunSqlToolArgs(sql=corrected)
                     sql = corrected
 
@@ -1693,9 +1824,14 @@ async def _get_chat_response(message: str) -> str:
                                 "Eres TIARA, un asistente de análisis de datos. "
                                 "Solo puedes hacer dos cosas:\n"
                                 "1. Responder saludos, despedidas y agradecimientos de forma breve y amigable.\n"
-                                "2. Explicar brevemente qué tipo de preguntas puedes responder "
-                                "(ventas, productos, clientes, territorios, empleados, tendencias — "
-                                "todo basado en la base de datos proporcionada).\n"
+                                "2. Explicar qué puedes hacer cuando el usuario pregunta por tus capacidades, "
+                                "funciones o cómo funcionar. Ejemplos que activan esto: "
+                                "'qué puedes hacer', 'dime qué puedes hacer', 'para qué sirves', "
+                                "'qué tipos de preguntas respondes', 'eso es todo lo que puedes hacer', "
+                                "'qué más puedes hacer', 'cómo funcionas'. "
+                                "En ese caso explica brevemente que puedes responder preguntas sobre "
+                                "ventas, productos, clientes, territorios, empleados y tendencias "
+                                "basadas en la base de datos de la empresa.\n"
                                 "Para CUALQUIER otra cosa (chistes, preguntas generales, temas externos, "
                                 "opiniones, etc.), responde EXACTAMENTE: "
                                 "'Solo puedo ayudarte a responder preguntas de la base de datos proporcionada.'\n"
@@ -1947,6 +2083,13 @@ async def run_agent_stream_text(
 
     original_question = message
 
+    # 0. Bloquear intención destructiva antes de cualquier procesamiento
+    if _has_destructive_intent(original_question):
+        logger.warning("Intención destructiva detectada y bloqueada: %.100s", original_question)
+        _ctx_intent.set("CHAT")
+        yield _READONLY_REFUSAL
+        return
+
     # 0. Clasificar intención — enruta a SQL, proyección, discovery o conversación
     if not retry:
         intent = await _classify_intent(original_question)
@@ -2007,6 +2150,15 @@ async def run_agent_stream_text(
         # Con temporales: re-ejecutar SQL para obtener valores correctos.
         # Si es pregunta de gráfico y el SQL solo devuelve 1 fila, ignorar
         # caché y regenerar para que el LLM genere desglose por mes/categoría.
+        if cached_sql and SQL_RUNNER:
+            temporal_errors = _validate_temporal_filter(cached_sql, original_question)
+            if temporal_errors:
+                logger.warning(
+                    "Cache HIT descartado — SQL sin filtro temporal: %s", temporal_errors[0]
+                )
+                _evict_sql_cache(original_question)
+                cached_sql = None
+
         if cached_sql and SQL_RUNNER:
             try:
                 tool_args = RunSqlToolArgs(sql=cached_sql)
