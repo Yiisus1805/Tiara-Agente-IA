@@ -275,14 +275,44 @@ def _fix_lang_prefix_columns(sql: str) -> str:
     return fixed
 
 
-def _sanitize_sql_aliases(sql: str) -> str:
-    # 1. Corregir nombres de columna con prefijo de idioma faltante
-    fixed = _fix_lang_prefix_columns(sql)
+_KEYWORD_ALIAS_RE = re.compile(
+    r'\bFROM\s+(\w+)\s+(AS|ON|IN|BY)\b(?=\s*(?:\n|\r|\Z|JOIN\b|WHERE\b|ON\b|GROUP\b|ORDER\b|HAVING\b|INNER\b|LEFT\b|RIGHT\b|FULL\b|CROSS\b))',
+    re.IGNORECASE,
+)
+_KEYWORD_ALIAS_MAP = {'AS': 'ASales', 'ON': 'OnRef', 'IN': 'InRef', 'BY': 'ByRef'}
 
-    # 2. Añadir ORDER BY faltante en funciones de ventana (LAG/LEAD/etc.)
+
+def _fix_keyword_table_alias(sql: str) -> str:
+    """Corrige aliases de tabla que son palabras reservadas de SQL Server.
+
+    Ejemplo: FROM AllSales AS → FROM AllSales ASales
+    y sustituye todas las referencias AS.columna → ASales.columna
+    """
+    result = sql
+    for m in _KEYWORD_ALIAS_RE.finditer(sql):
+        bad = m.group(2).upper()
+        safe = _KEYWORD_ALIAS_MAP.get(bad, bad + 'Ref')
+        result = _KEYWORD_ALIAS_RE.sub(
+            lambda x: f'FROM {x.group(1)} {_KEYWORD_ALIAS_MAP.get(x.group(2).upper(), x.group(2) + "Ref")}',
+            result,
+        )
+        result = re.sub(rf'\b{re.escape(bad)}\.', f'{safe}.', result)
+        logger.info("SQL corregido — alias reservado '%s' reemplazado por '%s'", bad, safe)
+        break  # _KEYWORD_ALIAS_RE.sub ya reemplazó todos; la iteración es solo para loggear
+    return result
+
+
+def _sanitize_sql_aliases(sql: str) -> str:
+    # 1. Corregir aliases de tabla que son palabras reservadas (AS, ON, IN, BY)
+    fixed = _fix_keyword_table_alias(sql)
+
+    # 2. Corregir nombres de columna con prefijo de idioma faltante
+    fixed = _fix_lang_prefix_columns(fixed)
+
+    # 3. Añadir ORDER BY faltante en funciones de ventana (LAG/LEAD/etc.)
     fixed = _fix_window_order_by(fixed)
 
-    # 3. Eliminar ORDER BY inválido dentro de CTEs y capturarlo para moverlo
+    # 4. Eliminar ORDER BY inválido dentro de CTEs y capturarlo para moverlo
     fixed, removed_order_by = _remove_cte_order_by(fixed)
     if removed_order_by:
         logger.info("SQL corregido — ORDER BY eliminado de CTE sin TOP")
