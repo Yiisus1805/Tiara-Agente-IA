@@ -258,14 +258,26 @@ _LANG_PREFIX_FIXES = [
     # DimProductSubcategory: ProductSubcategoryName → EnglishProductSubcategoryName
     (re.compile(r'\b(?<!\bEnglish)(?<!\bSpanish)(?<!\bFrench)(ProductSubcategoryName)\b', re.IGNORECASE),
      'EnglishProductSubcategoryName'),
-    # DimProduct: ProductName → EnglishProductName (solo cuando precede alias de tabla DPC./DPSC./DP.)
+    # DimProduct: ProductDescription → EnglishDescription
     (re.compile(r'\b(?<!\bEnglish)(?<!\bSpanish)(?<!\bFrench)(ProductDescription)\b', re.IGNORECASE),
      'EnglishDescription'),
+    # DimProduct: ProductName → EnglishProductName (columna real en DimProduct)
+    (re.compile(r'\b(?<!\bEnglish)(?<!\bSpanish)(?<!\bFrench)(ProductName)\b', re.IGNORECASE),
+     'EnglishProductName'),
+    # DimDate alias DD: DD.Date / DD.CalendarDate → DD.FullDateAlternateKey
+    (re.compile(r'\bDD\.(?:Date|CalendarDate)\b', re.IGNORECASE),
+     'DD.FullDateAlternateKey'),
+    # DimDate alias DD: DD.MonthName → DD.EnglishMonthName
+    (re.compile(r'\bDD\.MonthName\b', re.IGNORECASE),
+     'DD.EnglishMonthName'),
+    # DimDate alias DD: DD.DayName → DD.EnglishDayNameOfWeek
+    (re.compile(r'\bDD\.DayName\b', re.IGNORECASE),
+     'DD.EnglishDayNameOfWeek'),
 ]
 
 
 def _fix_lang_prefix_columns(sql: str) -> str:
-    """Corrige columnas de DimProductCategory/Subcategory que requieren prefijo English."""
+    """Corrige columnas que requieren prefijo English o cuyo nombre es incorrecto."""
     fixed = sql
     for pattern, replacement in _LANG_PREFIX_FIXES:
         new = pattern.sub(replacement, fixed)
@@ -275,11 +287,56 @@ def _fix_lang_prefix_columns(sql: str) -> str:
     return fixed
 
 
+# Detecta SUM/COUNT/AVG * 100 / SUM/COUNT/AVG sin NULLIF — división por cero potencial
+_DIV_ZERO_PCT_RE = re.compile(
+    r'((?:SUM|COUNT|AVG)\s*\([^)]+\)\s*(?:\*\s*100(?:\.0)?)?)\s*/\s*((?:SUM|COUNT|AVG)\s*\([^)]+\))',
+    re.IGNORECASE,
+)
+
+
+def _fix_division_by_zero(sql: str) -> str:
+    """Envuelve denominadores en NULLIF(..., 0) para prevenir errores de división por cero."""
+    def _wrap(m: re.Match) -> str:
+        numerator = m.group(1)
+        denominator = m.group(2)
+        if 'NULLIF' in denominator.upper():
+            return m.group(0)
+        logger.info("SQL corregido — NULLIF añadido para prevenir división por cero")
+        return f"{numerator} / NULLIF({denominator}, 0)"
+    return _DIV_ZERO_PCT_RE.sub(_wrap, sql)
+
+
 _KEYWORD_ALIAS_RE = re.compile(
     r'\bFROM\s+(\w+)\s+(AS|ON|IN|BY)\b(?=\s*(?:\n|\r|\Z|JOIN\b|WHERE\b|ON\b|GROUP\b|ORDER\b|HAVING\b|INNER\b|LEFT\b|RIGHT\b|FULL\b|CROSS\b))',
     re.IGNORECASE,
 )
 _KEYWORD_ALIAS_MAP = {'AS': 'ASales', 'ON': 'OnRef', 'IN': 'InRef', 'BY': 'ByRef'}
+
+# Captura FROM table AS <keyword> donde el alias es la propia keyword (ej. FROM AllSales AS AS)
+_KEYWORD_SELF_ALIAS_RE = re.compile(
+    r'\bFROM\s+(\w+)\s+AS\s+(AS|ON|IN|BY)\b',
+    re.IGNORECASE,
+)
+
+
+def _fix_keyword_self_alias(sql: str) -> str:
+    """Corrige FROM table AS <keyword> donde el alias es también una keyword reservada.
+
+    Ejemplo: FROM AllSales AS AS → FROM AllSales ASales
+    y reemplaza todas las referencias AS.columna → ASales.columna en el SQL.
+    """
+    result = sql
+    for m in _KEYWORD_SELF_ALIAS_RE.finditer(sql):
+        bad_alias = m.group(2).upper()
+        safe_alias = _KEYWORD_ALIAS_MAP.get(bad_alias, bad_alias + 'Ref')
+        result = _KEYWORD_SELF_ALIAS_RE.sub(
+            lambda x: f'FROM {x.group(1)} {_KEYWORD_ALIAS_MAP.get(x.group(2).upper(), x.group(2).upper() + "Ref")}',
+            result,
+        )
+        result = re.sub(rf'\b{re.escape(bad_alias)}\.', f'{safe_alias}.', result)
+        logger.info("SQL corregido — alias doble-keyword 'AS %s' → '%s'", bad_alias, safe_alias)
+        break
+    return result
 
 
 def _fix_keyword_table_alias(sql: str) -> str:
@@ -303,43 +360,47 @@ def _fix_keyword_table_alias(sql: str) -> str:
 
 
 def _sanitize_sql_aliases(sql: str) -> str:
-    # 1. Corregir aliases de tabla que son palabras reservadas (AS, ON, IN, BY)
-    fixed = _fix_keyword_table_alias(sql)
+    # 1. Corregir FROM table AS <keyword> (alias = keyword tras AS — ej. FROM AllSales AS AS)
+    fixed = _fix_keyword_self_alias(sql)
+    # 2. Corregir aliases de tabla que son palabras reservadas sin AS previo (ej. FROM AllSales AS)
+    fixed = _fix_keyword_table_alias(fixed)
 
-    # 2. Corregir nombres de columna con prefijo de idioma faltante
+    # 3. Corregir nombres de columna con prefijo de idioma faltante o nombre incorrecto
     fixed = _fix_lang_prefix_columns(fixed)
 
-    # 3. Añadir ORDER BY faltante en funciones de ventana (LAG/LEAD/etc.)
+    # 4. Añadir ORDER BY faltante en funciones de ventana (LAG/LEAD/etc.)
     fixed = _fix_window_order_by(fixed)
 
-    # 4. Eliminar ORDER BY inválido dentro de CTEs y capturarlo para moverlo
+    # 5. Eliminar ORDER BY inválido dentro de CTEs y capturarlo para moverlo
     fixed, removed_order_by = _remove_cte_order_by(fixed)
     if removed_order_by:
         logger.info("SQL corregido — ORDER BY eliminado de CTE sin TOP")
-        # Si el SELECT final tiene TOP pero no ORDER BY, mover allí el ORDER BY capturado
         has_top_outer = bool(re.search(r'\bSELECT\s+TOP\b', fixed, re.IGNORECASE))
         has_order_outer = bool(re.search(r'\bORDER\s+BY\b', fixed, re.IGNORECASE))
         if has_top_outer and not has_order_outer:
             fixed = fixed.rstrip().rstrip(';').rstrip() + '\n' + removed_order_by + ';'
             logger.info("SQL corregido — ORDER BY movido al SELECT final")
 
-    # 4. Convertir FETCH FIRST N ROWS ONLY → SELECT TOP N
+    # 6. Convertir FETCH FIRST N ROWS ONLY → SELECT TOP N
     fixed = _fix_fetch_first(fixed)
 
-    # 5. Añadir JOIN a DimDate cuando falta en un CTE que lo referencia
+    # 7. Añadir JOIN a DimDate cuando falta en un CTE que lo referencia
     fixed = _fix_missing_dimdate_join(fixed)
 
-    # 6. Proteger contextos donde las palabras son keywords válidos
+    # 8. Proteger denominadores de división por cero en cálculos de porcentaje
+    fixed = _fix_division_by_zero(fixed)
+
+    # 9. Proteger contextos donde las palabras son keywords válidos
     guarded = fixed
     for guard_pattern, placeholder in _SQL_KEYWORD_GUARDS:
         guarded = re.sub(guard_pattern, placeholder, guarded, flags=re.IGNORECASE)
 
-    # 7. Reemplazar alias problemáticos
+    # 10. Reemplazar alias problemáticos
     sanitized = guarded
     for pattern, replacement in _RESERVED_ALIAS_REPLACEMENTS.items():
         sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
 
-    # 8. Restaurar keywords protegidos
+    # 11. Restaurar keywords protegidos
     sanitized = sanitized.replace('FETCH __NEXT__', 'FETCH NEXT')
     sanitized = sanitized.replace('__CURRENT_', 'CURRENT_')
     return sanitized
@@ -382,16 +443,23 @@ _INJECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Intención destructiva sobre la BD — requiere verbo + objeto explícito de BD
-# NO captura: "datos actualizados", "cambió el valor", "modificaciones históricas"
-_DB_OBJECT = r'(?:registro|dato|fila|entrada|tabla|record)'
+# Intención destructiva sobre la BD
+# "eliminar/borrar/suprimir" + artículo se bloquea siempre (verbos inherentemente destructivos).
+# "modificar/actualizar" requiere objeto de BD explícito para evitar falsos positivos.
+_DB_OBJECT = (
+    r'(?:registro|dato|fila|entrada|tabla|record'
+    r'|venta|ventas|pedido|pedidos|orden|ordenes|órdenes'
+    r'|cliente|clientes|producto|productos|empleado|empleados'
+    r'|precio|precios|transaccion|transacciones|transacción|transacciones'
+    r'|compra|compras|factura|facturas|inventario)'
+)
 _DESTRUCTIVE_INTENT_RE = re.compile(
     r'\b('
-    # Eliminar/borrar + objeto de BD explícito
-    r'elimin[ae]r?\s+(?:el|la|los|las|este|ese|un|una|todos?|todas?)\s*' + _DB_OBJECT + r'|'
-    r'borr[ae]r?\s+(?:el|la|los|las|este|ese|un|una|todos?|todas?)\s*' + _DB_OBJECT + r'|'
-    r'suprim[ei]r?\s+(?:el|la|los|las|este|ese)\s*' + _DB_OBJECT + r'|'
-    # SQL keywords escritos en lenguaje natural con objeto de BD
+    # Eliminar/borrar/suprimir + artículo → siempre destructivo en contexto de datos
+    r'elimin[ae]r?\s+(?:el|la|los|las|este|ese|un|una|todos?|todas?)\s+\w+|'
+    r'borr[ae]r?\s+(?:el|la|los|las|este|ese|un|una|todos?|todas?)\s+\w+|'
+    r'suprim[ei]r?\s+(?:el|la|los|las|este|ese|un|una|todos?|todas?)\s+\w+|'
+    # SQL keywords escritos en lenguaje natural
     r'drop\s+(?:la\s+)?tabla|'
     r'delete\s+(?:de|from|el|la)\b|'
     r'trunca[rt](?:e|ar)?\s+(?:la\s+)?tabla|'
@@ -556,6 +624,11 @@ async def _get_corrected_sql(question: str, bad_sql: str, problem: str) -> Optio
         f"Problema detectado: {problem}\n\n"
         f"Esquema disponible:\n{schema_context}\n\n"
         "REGLAS CRÍTICAS:\n"
+        "- ALIAS: NUNCA uses AS, ON, IN, BY, FROM, WHERE, JOIN, GROUP, ORDER, SELECT como alias de tabla. "
+        "Usa alias descriptivos cortos: AllSales, FIS, FRS, DD, DC, DE, etc. "
+        "Incorrecto: FROM AllSales AS AS. Correcto: FROM AllSales AllS.\n"
+        "- CTE: Si defines un CTE llamado AllSales, refiérelo directamente como AllSales sin alias adicional. "
+        "Incorrecto: FROM AllSales AS AS. Correcto: FROM AllSales.\n"
         "- Si la pregunta menciona un nombre de VENDEDOR/EMPLEADO (quien hace la venta): "
         "usa DimEmployee DE + FactResellerSales FRS ON FRS.EmployeeKey = DE.EmployeeKey. "
         "NUNCA busques un vendedor en DimCustomer.\n"
@@ -648,6 +721,45 @@ def _validate_temporal_filter(sql: str, question: str) -> list[str]:
     ]
 
 
+_FIS_ONLY_RE = re.compile(r'\bFactInternetSales\b', re.IGNORECASE)
+_FRS_ONLY_RE = re.compile(r'\bFactResellerSales\b', re.IGNORECASE)
+_CHANNEL_KEYWORD_RE = re.compile(
+    r'\b(online|internet|canal\s+directo|solo\s+online|solo\s+internet'
+    r'|reseller|distribuidor|canal\s+indirecto|solo\s+reseller)\b',
+    re.IGNORECASE,
+)
+
+
+def _validate_sales_source(sql: str, question: str) -> list[str]:
+    """Detecta cuando el SQL usa solo FIS o solo FRS en una consulta de ventas generales.
+
+    Las ventas totales requieren UNION ALL de ambas tablas. Si la pregunta no
+    especifica canal y el SQL omite una de las dos, los totales son incorrectos.
+    """
+    has_fis = bool(_FIS_ONLY_RE.search(sql))
+    has_frs = bool(_FRS_ONLY_RE.search(sql))
+
+    if has_fis and has_frs:
+        return []
+    if not has_fis and not has_frs:
+        return []
+    if _CHANNEL_KEYWORD_RE.search(question):
+        return []
+
+    present = "FactInternetSales" if has_fis else "FactResellerSales"
+    missing = "FactResellerSales" if has_fis else "FactInternetSales"
+    return [
+        f"El SQL usa solo {present} pero la pregunta no especifica canal. "
+        f"Las ventas totales requieren UNION ALL de ambas tablas. "
+        f"Reescribe usando: WITH AllSales AS ("
+        f"SELECT OrderDateKey, SalesTerritoryKey, ProductKey, OrderQuantity, SalesAmount, TotalProductCost "
+        f"FROM dbo.FactInternetSales UNION ALL "
+        f"SELECT OrderDateKey, SalesTerritoryKey, ProductKey, OrderQuantity, SalesAmount, TotalProductCost "
+        f"FROM dbo.FactResellerSales) y aplica el JOIN y filtros sobre AllSales. "
+        f"Sin {missing} los totales son parciales e incorrectos."
+    ]
+
+
 # ── FIN VALIDACIÓN Y CORRECCIÓN ───────────────────────────────────────────────
 
 
@@ -698,6 +810,17 @@ class TrackingSqlTool(RunSqlTool):
                 corrected = await _get_corrected_sql(current_question, sql, problem)
                 if corrected and corrected != sql:
                     logger.info("SQL corregido con filtro temporal por LLM antes de ejecutar")
+                    _evict_sql_cache(current_question)
+                    args = RunSqlToolArgs(sql=corrected)
+                    sql = corrected
+
+            source_errors = _validate_sales_source(sql, current_question or "")
+            if source_errors and current_question and not join_errors:
+                problem = "; ".join(source_errors)
+                logger.warning("Fuente de ventas incompleta: %s — solicitando corrección al LLM", problem)
+                corrected = await _get_corrected_sql(current_question, sql, problem)
+                if corrected and corrected != sql:
+                    logger.info("SQL corregido para incluir ambas fuentes de ventas")
                     _evict_sql_cache(current_question)
                     args = RunSqlToolArgs(sql=corrected)
                     sql = corrected
@@ -1908,6 +2031,15 @@ def _build_schema_prompt(message: str, hits: list) -> str:
 
     return (
         "Eres un experto en SQL Server y análisis de negocio. Reglas:\n"
+        "0. ACCESO DE SOLO LECTURA (REGLA ABSOLUTA E IRROMPIBLE):\n"
+        "   Esta base de datos es de SOLO LECTURA. Está COMPLETAMENTE PROHIBIDO generar, sugerir\n"
+        "   o ejecutar cualquier sentencia DELETE, UPDATE, INSERT, DROP, TRUNCATE, ALTER, MERGE,\n"
+        "   CREATE, EXEC o cualquier operación que modifique o elimine datos.\n"
+        "   Si el usuario pide eliminar, borrar, modificar o insertar datos, responde EXACTAMENTE:\n"
+        "   'Solo tengo acceso de lectura a la base de datos. No puedo eliminar, modificar ni "
+        "insertar registros. Si necesitas hacer cambios, contacta al administrador del sistema.'\n"
+        "   NUNCA digas que realizaste una operación de escritura. NUNCA confirmes que se eliminó\n"
+        "   o modificó algo. Solo puedes consultar (SELECT).\n"
         "1. Usa SOLO tablas y columnas del esquema dado.\n"
         "2. Llama a run_sql EXACTAMENTE UNA VEZ. ABSOLUTAMENTE PROHIBIDO ejecutar run_sql más de una vez.\n"
         "   Si necesitas múltiples datos, combínalos en UNA sola query con CTEs o subconsultas.\n"
@@ -1915,10 +2047,7 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "   Para filtrar por año en DimDate usa SIEMPRE: JOIN dbo.DimDate DD ON FIS.OrderDateKey = DD.DateKey — luego WHERE DD.CalendarYear IN (...)\n"
         "3. Para limitar filas usa TOP N al inicio del SELECT principal: SELECT TOP N ...\n"
         "   ORDER BY va SIEMPRE en el SELECT final, NUNCA dentro de una CTE (SQL Server devuelve error).\n"
-        "   NUNCA uses FETCH FIRST N ROWS ONLY — SQL Server solo soporta SELECT TOP N.\n"
-        "4. No menciones CSV, archivos, ni muestres el SQL generado.\n"
-        "5. No uses **, ##, ni markdown en tus respuestas.\n"
-        "6. NUNCA digas que el esquema no tiene información si hay tablas Fact con métricas.\n\n"
+        "4. No uses **, ##, ni markdown en tus respuestas.\n\n"
         "ALIAS DE TABLAS (CRÍTICO — error frecuente):\n"
         "NUNCA uses palabras reservadas de SQL Server como alias de tabla o CTE. Lista negra PROHIBIDA:\n"
         "  IS, AS, IN, ON, BY, OR, AND, NOT, TO, AT, GO, IF, DO,\n"
@@ -1975,6 +2104,10 @@ def _build_schema_prompt(message: str, hits: list) -> str:
         "AÑOS Y FECHAS (CRÍTICO):\n"
         "NUNCA uses GETDATE(), YEAR(GETDATE()), ni el año actual del sistema como referencia.\n"
         "Los datos disponibles en la base de datos tienen un rango histórico fijo.\n"
+        "- CONTEXTO DE CONVERSACIÓN: si la pregunta actual NO menciona año/mes pero en el historial\n"
+        "  el usuario SÍ especificó un período (ej: 'julio 2012', '2013'), aplica ese mismo período.\n"
+        "  Ejemplo: si antes preguntó 'ventas de julio 2012' y ahora dice 'desgloce por región',\n"
+        "  el filtro debe ser WHERE DD.CalendarYear = 2012 AND DD.MonthNumberOfYear = 7.\n"
         "- Si la pregunta NO especifica un año → usa los años reales del dataset con:\n"
         "    SELECT MIN(CalendarYear), MAX(CalendarYear) FROM dbo.DimDate\n"
         "  o filtra con: WHERE DD.CalendarYear IN (SELECT DISTINCT CalendarYear FROM dbo.DimDate)\n"
@@ -2308,7 +2441,7 @@ async def run_agent_stream_text(
         async for chunk in _step_agent(conversation_id):
             yield chunk
     except TimeoutError:
-        yield ERROR_RETRY_SENTINEL + "El agente tardó demasiado en responder."
+        yield ERROR_RETRY_SENTINEL + "La consulta tardó demasiado. Puedes intentarlo de nuevo."
         return
     except Exception as exc:
         # Historial corrupto por tool_call sin respuesta → limpiar y reintentar una vez
@@ -2326,11 +2459,11 @@ async def run_agent_stream_text(
                     yield chunk
             except Exception:
                 logger.exception("Error en reintento tras limpiar conversación")
-                yield ERROR_RETRY_SENTINEL + "Ocurrió un error procesando tu pregunta."
+                yield ERROR_RETRY_SENTINEL + "No pude procesar tu pregunta en este momento. Intenta de nuevo."
                 return
         else:
             logger.exception("Error en agent.send_message")
-            yield ERROR_RETRY_SENTINEL + "Ocurrió un error procesando tu pregunta."
+            yield ERROR_RETRY_SENTINEL + "No pude procesar tu pregunta en este momento. Intenta de nuevo."
             return
 
     # 5. Emitir respuesta
@@ -2406,7 +2539,7 @@ async def run_agent_stream_text(
                     logger.warning("SQL corregido también falló: %s", e)
 
         if df is None:
-            yield ERROR_RETRY_SENTINEL + "Ocurrió un error al procesar los resultados."
+            yield ERROR_RETRY_SENTINEL + "No pude obtener los datos para esa consulta. Intenta de nuevo o reformula la pregunta."
             return
         try:
             if df.empty:
@@ -2459,7 +2592,7 @@ async def run_agent_stream_text(
                     yield token
         except Exception:
             logger.exception("Error en fallback de renderizado")
-            yield ERROR_RETRY_SENTINEL + "Ocurrió un error al procesar los resultados."
+            yield ERROR_RETRY_SENTINEL + "Tuve un problema al preparar la respuesta. Puedes intentarlo de nuevo."
     else:
         combined_pre = " ".join(pre_table_buffer)
         if pre_table_buffer and _is_vague_analysis(combined_pre) and captured_sql and SQL_RUNNER:
@@ -2487,6 +2620,28 @@ async def run_agent_stream_text(
             for chunk in pre_table_buffer:
                 response_chunks.append(chunk)
                 yield chunk
+
+    # Guard: si el agente completó sin generar ningún contenido útil, evitar burbuja vacía.
+    # También limpiar el historial: output vacío casi siempre indica historial corrupto
+    # (tool_call sin tool_response) que Vanna absorbe internamente sin relanzar la excepción.
+    if not response_chunks:
+        logger.warning(
+            "Agente sin output — posible historial corrupto, limpiando conv %s y generando fallback",
+            conversation_id,
+        )
+        if conversation_id:
+            try:
+                await agent.conversation_store.delete_conversation(conversation_id)
+                logger.info("Conversación %s limpiada tras output vacío", conversation_id)
+            except Exception:
+                pass
+        intent = _ctx_intent.get() or "SQL"
+        if intent == "CHAT":
+            fallback = await _get_chat_response(original_question)
+            yield fallback
+        else:
+            yield ERROR_RETRY_SENTINEL + "No pude procesar tu consulta en este momento. Por favor, intenta de nuevo."
+        return
 
     # 6. Gráfico (si el usuario lo pidió y hay SQL disponible)
     if _is_chart_question(original_question) and captured_sql and SQL_RUNNER:

@@ -162,7 +162,7 @@ async def tiara_chat_stream(request: Request, _user: dict = Depends(require_auth
 
             except Exception as e:
                 success = False
-                yield f"data: {json.dumps({'type': 'error_retry', 'message': 'Ocurrió un error inesperado.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'error_retry', 'message': 'No pude completar la consulta. Puedes intentarlo de nuevo.'})}\n\n"
                 traceback.print_exc()
             finally:
                 duration_ms = int((time.time() - start_time) * 1000)
