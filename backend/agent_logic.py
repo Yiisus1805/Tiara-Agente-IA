@@ -2598,8 +2598,12 @@ async def run_agent_stream_text(
                     response_chunks.append(analysis_text)
                     logger.info("Fallback completo (streaming) emitido correctamente")
             else:
+                no_results_text = ""
                 async for token in _stream_no_results(original_question):
+                    no_results_text += token
                     yield token
+                if no_results_text:
+                    response_chunks.append(no_results_text)
         except Exception:
             logger.exception("Error en fallback de renderizado")
             yield ERROR_RETRY_SENTINEL + "Tuve un problema al preparar la respuesta. Puedes intentarlo de nuevo."
