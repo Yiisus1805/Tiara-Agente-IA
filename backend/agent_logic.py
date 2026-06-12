@@ -728,6 +728,12 @@ _CHANNEL_KEYWORD_RE = re.compile(
     r'|reseller|distribuidor|canal\s+indirecto|solo\s+reseller)\b',
     re.IGNORECASE,
 )
+# CustomerKey solo existe en FactInternetSales; si el SQL lo referencia no debe forzarse UNION ALL
+_CUSTOMER_SQL_RE = re.compile(r'\b(DimCustomer|CustomerKey)\b', re.IGNORECASE)
+_CUSTOMER_QUESTION_RE = re.compile(
+    r'\b(cliente|clientes|customer|customers)\b',
+    re.IGNORECASE,
+)
 
 
 def _validate_sales_source(sql: str, question: str) -> list[str]:
@@ -744,6 +750,10 @@ def _validate_sales_source(sql: str, question: str) -> list[str]:
     if not has_fis and not has_frs:
         return []
     if _CHANNEL_KEYWORD_RE.search(question):
+        return []
+    # CustomerKey no existe en FactResellerSales — forzar UNION ALL en consultas de
+    # clientes produciría un error de columna inválida.
+    if _CUSTOMER_SQL_RE.search(sql) or _CUSTOMER_QUESTION_RE.search(question):
         return []
 
     present = "FactInternetSales" if has_fis else "FactResellerSales"
@@ -2455,7 +2465,7 @@ async def run_agent_stream_text(
             except Exception:
                 pass
             try:
-                async for chunk in _step_agent(conversation_id):
+                async for chunk in _step_agent(None):
                     yield chunk
             except Exception:
                 logger.exception("Error en reintento tras limpiar conversación")
