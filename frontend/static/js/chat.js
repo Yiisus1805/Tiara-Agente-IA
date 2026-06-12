@@ -37,7 +37,7 @@ const sendBtn = document.getElementById("send-btn");
 const resetBtn = document.getElementById("reset-btn");
 
 userInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") sendMessage();
+  if (e.key === "Enter" && !sendBtn.disabled) sendMessage();
 });
 
 sendBtn.addEventListener("click", sendMessage);
@@ -199,7 +199,7 @@ function createTypewriter(bubble, scrollEl) {
 
 // ── SSE stream helper ────────────────────────────────────────────────────────
 
-const SSE_IDLE_TIMEOUT_MS = 35000; // 35 s sin datos → reintento automático
+const SSE_IDLE_TIMEOUT_MS = 60000; // 60 s sin datos → reintento automático
 
 function readWithTimeout(reader, ms) {
   return Promise.race([
@@ -242,7 +242,7 @@ async function streamIntoBubble(question, bubble, isRetry) {
 
     const msg = document.createElement("p");
     msg.className = "error-msg";
-    msg.textContent = message || "Ocurrió un error al generar la respuesta.";
+    msg.textContent = message || "No pude generar una respuesta. Puedes intentarlo de nuevo.";
 
     const btn = document.createElement("button");
     btn.className = "btn retry-btn";
@@ -274,7 +274,7 @@ async function streamIntoBubble(question, bubble, isRetry) {
         ({ value, done } = await readWithTimeout(reader, SSE_IDLE_TIMEOUT_MS));
       } catch (e) {
         if (e.message === "sse_timeout") {
-          showRetryError("Sin respuesta del servidor. Haz clic para intentar de nuevo.");
+          showRetryError("La consulta tardó demasiado. Puedes intentarlo de nuevo.");
           return;
         }
         throw e;
@@ -328,7 +328,7 @@ async function streamIntoBubble(question, bubble, isRetry) {
   } catch (err) {
     clearTimeout(slowTimer);
     tw.flush();
-    bubble.innerHTML = "Error conectando con Tiara.";
+    bubble.innerHTML = "No pude conectarme en este momento. Verifica tu conexión e intenta de nuevo.";
     sendBtn.disabled = false;
   }
 }
