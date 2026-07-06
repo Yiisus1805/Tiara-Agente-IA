@@ -12,6 +12,12 @@ __pycache__/
 # audit logs (se genera automáticamente en el servidor)
 backend/audit.db
 
+# share links db (se genera automáticamente en el servidor)
+backend/share.db
+
+# hash del esquema de BD (se recalcula automáticamente por schema_analyzer.py)
+backend/.schema_hash
+
 # vscode
 .vscode/
 

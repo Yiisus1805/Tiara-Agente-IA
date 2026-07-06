@@ -8,6 +8,7 @@ import traceback
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -18,6 +19,7 @@ from .agent_logic import build_agent, run_agent_stream_text, CHART_SENTINEL, ERR
 from .auth import check_credentials, create_token, require_auth
 from .admin import router as admin_router
 from . import audit
+from . import share
 
 
 agent = build_agent()
@@ -39,7 +41,10 @@ FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 STATIC_DIR = os.path.join(FRONTEND_DIR, "static")
 
 if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    # GZip solo en /static: comprimir la ruta de streaming del chat (SSE)
+    # bufferearía los chunks y rompería el streaming token a token.
+    static_app = GZipMiddleware(StaticFiles(directory=STATIC_DIR), minimum_size=500)
+    app.mount("/static", static_app, name="static")
 
 
 def build_request_context(request: Request) -> RequestContext:
@@ -74,7 +79,7 @@ async def health():
 
 @app.get("/api/test-db")
 async def test_db():
-    from .agent_logic import SQL_RUNNER
+    from .agent_state import SQL_RUNNER
     try:
         if SQL_RUNNER is None:
             return JSONResponse({"status": "error", "message": "SQL_RUNNER no inicializado"}, status_code=500)
@@ -98,6 +103,45 @@ async def admin_page():
 @app.get("/")
 async def root():
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+
+@app.get("/share/{share_id}")
+async def shared_page(share_id: str):
+    return FileResponse(os.path.join(FRONTEND_DIR, "shared.html"))
+
+
+# Compartir resultado por link (expira a las 2 horas)
+
+class ShareBody(BaseModel):
+    question: str
+    html_content: str = ""
+    narrative: str = ""
+    chart_data: dict | None = None
+
+
+@app.post("/api/tiara/share")
+async def create_share(body: ShareBody, _user: dict = Depends(require_auth)):
+    username = _user.get("sub", "unknown")
+    result = share.create_share(
+        created_by=username,
+        question=body.question,
+        html_content=body.html_content,
+        narrative=body.narrative,
+        chart_data=body.chart_data,
+    )
+    return {
+        "share_id": result["share_id"],
+        "url": f"/share/{result['share_id']}",
+        "expires_at": result["expires_at"],
+    }
+
+
+@app.get("/api/tiara/share/{share_id}")
+async def get_share(share_id: str):
+    result = share.get_share(share_id)
+    if not result:
+        return JSONResponse({"error": "Este enlace expiró o no existe."}, status_code=404)
+    return result
 
 
 # Chat (protegido con JWT) 
