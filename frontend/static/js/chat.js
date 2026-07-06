@@ -28,6 +28,32 @@ function _resetInactivityTimer() {
 );
 _resetInactivityTimer();
 
+// ── Carga diferida de librerías pesadas (solo cuando se usan) ────────────────
+function _loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("No se pudo cargar " + src));
+    document.head.appendChild(s);
+  });
+}
+
+let _echartsPromise = null;
+function ensureEcharts() {
+  if (typeof echarts !== "undefined") return Promise.resolve();
+  if (!_echartsPromise) _echartsPromise = _loadScript("https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js");
+  return _echartsPromise;
+}
+
+let _xlsxPromise = null;
+function ensureXLSX() {
+  if (typeof XLSX !== "undefined") return Promise.resolve();
+  if (!_xlsxPromise) _xlsxPromise = _loadScript("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js");
+  return _xlsxPromise;
+}
+
 let conversationId = crypto.randomUUID();
 let firstMessage = true;
 
@@ -175,9 +201,10 @@ function createTypewriter(bubble, scrollEl) {
       bubble.appendChild(outerWrap);
       scrollEl.scrollTop = scrollEl.scrollHeight;
 
-      exportBtn.addEventListener("click", () => {
+      exportBtn.addEventListener("click", async () => {
         const tableEl = wrapper.querySelector("table");
-        if (!tableEl || typeof XLSX === "undefined") return;
+        if (!tableEl) return;
+        await ensureXLSX();
         const wb = XLSX.utils.book_new();
         const ws = XLSX.utils.table_to_sheet(tableEl);
         XLSX.utils.book_append_sheet(wb, ws, "Datos");
@@ -302,13 +329,14 @@ async function streamIntoBubble(question, bubble, isRetry) {
 
         if (data.type === "chart") {
           tw.flush();
-          renderPlotlyChart(bubble, data.data);
+          await renderPlotlyChart(bubble, data.data);
           chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
         if (data.type === "done") {
           tw.flush();
           sendBtn.disabled = false;
+          addShareButton(bubble, question);
         }
 
         if (data.type === "error_retry") {
@@ -362,7 +390,9 @@ async function retryMessage(question, bubble) {
 }
 
 
-function renderPlotlyChart(bubble, chartData) {
+async function renderPlotlyChart(bubble, chartData) {
+  await ensureEcharts();
+
   const wrapper = document.createElement("div");
   wrapper.className = "chart-container";
 
@@ -377,6 +407,7 @@ function renderPlotlyChart(bubble, chartData) {
   toolbar.appendChild(exportBtn);
 
   const div = document.createElement("div");
+  div.className = "chart-render-target";
   div.style.width = "100%";
   div.style.height = "420px";
 
@@ -399,7 +430,66 @@ function renderPlotlyChart(bubble, chartData) {
 }
 
 
-// Detección de conexión 
+// ── Compartir resultado por link ─────────────────────────────────────────────
+
+function addShareButton(bubble, question) {
+  if (bubble.querySelector(".share-btn")) return;
+
+  const btn = document.createElement("button");
+  btn.className = "share-btn";
+  btn.type = "button";
+  btn.title = "Compartir este resultado";
+  btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.6" x2="15.4" y2="6.4"/><line x1="8.6" y1="13.4" x2="15.4" y2="17.6"/></svg> Compartir`;
+  btn.addEventListener("click", () => shareBubble(bubble, question, btn));
+  bubble.appendChild(btn);
+}
+
+async function shareBubble(bubble, question, btn) {
+  const tableEl = bubble.querySelector("table");
+  const html_content = tableEl ? tableEl.outerHTML : "";
+
+  const narrative = Array.from(bubble.querySelectorAll(".stream-text"))
+    .map((p) => p.textContent.trim())
+    .filter(Boolean)
+    .join("\n\n");
+
+  let chart_data = null;
+  const chartDiv = bubble.querySelector(".chart-render-target");
+  if (chartDiv && typeof echarts !== "undefined") {
+    const instance = echarts.getInstanceByDom(chartDiv);
+    if (instance) chart_data = instance.getOption();
+  }
+
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = "Generando link...";
+
+  try {
+    const resp = await fetch("/api/tiara/share", {
+      method: "POST",
+      headers: _authHeaders(),
+      body: JSON.stringify({ question, html_content, narrative, chart_data }),
+    });
+
+    if (resp.status === 401) { _handleUnauth(); return; }
+    if (!resp.ok) throw new Error("share failed");
+
+    const data = await resp.json();
+    const fullUrl = window.location.origin + data.url;
+    await navigator.clipboard.writeText(fullUrl);
+    btn.textContent = "✓ Link copiado (expira en 2h)";
+  } catch (e) {
+    btn.textContent = "No se pudo generar el link";
+  } finally {
+    setTimeout(() => {
+      btn.innerHTML = originalHtml;
+      btn.disabled = false;
+    }, 2500);
+  }
+}
+
+
+// Detección de conexión
 
 const offlineBanner = document.getElementById("offline-banner");
 
