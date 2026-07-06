@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TIARA — Resultado compartido</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="/static/css/styles.css">
+<link rel="stylesheet" href="/static/css/shared.css">
+</head>
+
+<body class="shared-body">
+
+<header>
+  <div class="logo-wrap">
+    <img src="/static/img/SAC-Logo.jpg" class="logo-img" alt="SAC Logo">
+    <div class="logo-sub">Servicios Avanzados de Consultoría</div>
+  </div>
+  <h1 class="header-title"><span class="t-blue">TI</span><span class="t-celeste">A</span><span class="t-orange">RA</span></h1>
+</header>
+
+<main class="shared-main">
+  <div class="shared-note" id="shared-note">Vista de solo lectura — este enlace es temporal.</div>
+
+  <div id="shared-content" class="shared-content hidden">
+    <div class="msg user">
+      <div class="msg-label">Pregunta:</div>
+      <div class="bubble" id="shared-question"></div>
+    </div>
+    <div class="msg bot">
+      <div class="msg-label">Tiara:</div>
+      <div class="bubble" id="shared-answer"></div>
+    </div>
+  </div>
+
+  <div id="shared-error" class="shared-error hidden">
+    Este enlace expiró o no existe.
+  </div>
+</main>
+
+<script src="/static/js/shared.js"></script>
+
+</body>
+</html>
