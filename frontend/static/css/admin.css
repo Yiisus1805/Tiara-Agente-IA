@@ -42,26 +42,6 @@ header {
 .header-title { font-size: 1.25rem; font-weight: 900; color: var(--blue); }
 .header-sub   { font-size: 0.72rem; color: var(--muted); font-weight: 600; }
 
-.header-right { display: flex; gap: 10px; align-items: center; }
-
-.btn-header {
-  padding: 8px 16px;
-  border-radius: 8px;
-  font-family: 'Nunito', sans-serif;
-  font-size: 0.85rem;
-  font-weight: 700;
-  cursor: pointer;
-  border: none;
-  background: var(--blue);
-  color: white;
-  text-decoration: none;
-  display: inline-flex;
-  align-items: center;
-  transition: opacity 0.15s;
-}
-.btn-header:hover { opacity: 0.85; }
-.btn-header.btn-danger { background: var(--danger); }
-
 /* ── Main ── */
 main {
   flex: 1;

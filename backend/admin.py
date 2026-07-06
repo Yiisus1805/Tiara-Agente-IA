@@ -12,12 +12,12 @@ router = APIRouter(prefix="/api/admin", dependencies=[Depends(require_auth)])
 
 
 def _get_sql_cache():
-    from .agent_logic import SQL_CACHE
+    from .agent_state import SQL_CACHE
     return SQL_CACHE
 
 
 def _get_schema_store():
-    from .agent_logic import SCHEMA_STORE
+    from .agent_state import SCHEMA_STORE
     return SCHEMA_STORE
 
 
@@ -63,7 +63,7 @@ async def add_sql_cache(body: SqlCacheEntry):
     if not body.question.strip() or not body.sql.strip():
         raise HTTPException(status_code=400, detail="question y sql son requeridos")
 
-    from .agent_logic import _normalize_question
+    from .sql_pipeline import _normalize_question
     normalized = _normalize_question(body.question.strip())
     cache.add(
         ids=[str(uuid.uuid4())],
