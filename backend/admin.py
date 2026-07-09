@@ -5,10 +5,10 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .auth import require_auth
+from .auth import require_auth, require_admin
 from . import audit
 
-router = APIRouter(prefix="/api/admin", dependencies=[Depends(require_auth)])
+router = APIRouter(prefix="/api/admin", dependencies=[Depends(require_admin)])
 
 
 def _get_sql_cache():
@@ -112,4 +112,4 @@ async def logs_summary():
 
 @router.get("/me")
 async def me(user: dict = Depends(require_auth)):
-    return {"username": user.get("sub")}
+    return {"username": user.get("sub"), "role": user.get("role")}

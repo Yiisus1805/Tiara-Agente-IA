@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+import time
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -21,15 +22,32 @@ class SqlServerRunner(SqlRunner):
         if "Encrypt=" not in odbc_conn_str:
             odbc_conn_str += ";Encrypt=no"
 
+        if "Connect Timeout=" not in odbc_conn_str and "Connection Timeout=" not in odbc_conn_str:
+            odbc_conn_str += ";Connect Timeout=30"
+
         self.engine = create_engine(
             "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_conn_str),
             poolclass=NullPool,
             future=True,
         )
 
-        # Smoke test
-        with self.engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        # Smoke test con reintentos: en el primer arranque en Render, la red o
+        # la base de datos pueden tardar unos segundos en estar disponibles.
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self.engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                break
+            except Exception:
+                if attempt == max_attempts:
+                    raise
+                wait = 2 ** attempt
+                print(
+                    f"[SQL] Intento {attempt}/{max_attempts} de conexión falló, reintentando en {wait}s...",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
 
         print("[SQL] SqlServerRunner inicializado correctamente", file=sys.stderr)
 

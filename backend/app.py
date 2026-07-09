@@ -64,10 +64,16 @@ class LoginBody(BaseModel):
 
 @app.post("/api/auth/login")
 async def login(body: LoginBody):
-    if not check_credentials(body.username, body.password):
+    role = check_credentials(body.username, body.password)
+    if not role:
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    token = create_token(body.username)
+    token = create_token(body.username, role)
     return {"access_token": token, "token_type": "bearer"}
+
+
+@app.get("/api/auth/me")
+async def auth_me(user: dict = Depends(require_auth)):
+    return {"username": user.get("sub"), "role": user.get("role")}
 
 
 # Páginas 

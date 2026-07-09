@@ -17,6 +17,18 @@ function logout() {
   window.location.href = "/login";
 }
 
+// ── Guard de rol: solo admin puede ver este panel ────────────────────────────
+async function guardAdminRole() {
+  const resp = await apiFetch("/api/auth/me");
+  if (!resp) return false;
+  const data = await resp.json();
+  if (data.role !== "admin") {
+    window.location.href = "/";
+    return false;
+  }
+  return true;
+}
+
 // ── Toast ────────────────────────────────────────────────────────────────────
 function showToast(msg, type = "success") {
   const el = document.getElementById("toast");
@@ -210,6 +222,9 @@ async function loadLogs() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-loadCache();
-loadSchema();
-loadLogs();
+(async () => {
+  if (!(await guardAdminRole())) return;
+  loadCache();
+  loadSchema();
+  loadLogs();
+})();
