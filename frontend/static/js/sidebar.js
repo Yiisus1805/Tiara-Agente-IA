@@ -57,4 +57,16 @@
       window.location.href = "/login";
     });
   }
+
+  // Oculta "Panel de Administración" para cuentas con rol distinto de admin
+  const token = localStorage.getItem("tiara_token");
+  const adminLink = sidebar.querySelector('.sidebar-link[data-page="admin"]');
+  if (token && adminLink) {
+    fetch("/api/auth/me", { headers: { "Authorization": `Bearer ${token}` } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && data.role !== "admin") adminLink.remove();
+      })
+      .catch(() => {});
+  }
 })();
