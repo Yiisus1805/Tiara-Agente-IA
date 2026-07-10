@@ -226,7 +226,7 @@ function createTypewriter(bubble, scrollEl) {
 
 // ── SSE stream helper ────────────────────────────────────────────────────────
 
-const SSE_IDLE_TIMEOUT_MS = 60000; // 60 s sin datos → reintento automático
+const SSE_IDLE_TIMEOUT_MS = 90000; // 90 s sin datos → reintento automático
 
 function readWithTimeout(reader, ms) {
   return Promise.race([
