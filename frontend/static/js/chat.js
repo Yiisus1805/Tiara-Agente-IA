@@ -1,6 +1,5 @@
 // ── Auth guard ──────────────────────────────────────────────────────────────
 const _token = localStorage.getItem("tiara_token");
-if (!_token) window.location.href = "/login";
 
 function _authHeaders() {
   return { "Authorization": `Bearer ${_token}`, "Content-Type": "application/json" };
@@ -9,6 +8,19 @@ function _authHeaders() {
 function _handleUnauth() {
   localStorage.removeItem("tiara_token");
   window.location.href = "/login";
+}
+
+if (!_token) {
+  window.location.href = "/login";
+} else {
+  // Verifica que el token siga siendo válido en el servidor antes de mostrar
+  // el chat — evita el "flash" de la página principal con una sesión vencida.
+  fetch("/api/auth/me", { headers: { "Authorization": `Bearer ${_token}` } })
+    .then((r) => {
+      if (r.status === 401) _handleUnauth();
+      else document.body.style.visibility = "visible";
+    })
+    .catch(() => { document.body.style.visibility = "visible"; });
 }
 
 // ── Inactivity timeout (30 min) ──────────────────────────────────────────────
