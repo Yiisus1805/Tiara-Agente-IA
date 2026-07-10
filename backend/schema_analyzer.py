@@ -378,11 +378,6 @@ def _get_connection():
 
 # ── API pública ───────────────────────────────────────────────────────────────
 
-def compute_schema_hash(cursor) -> str:
-    """Hash estable del esquema activo. Delega al introspector del motor configurado."""
-    return get_introspector().compute_hash(cursor)
-
-
 def analyze_schema(cursor=None) -> SchemaMetadata:
     """
     Consulta la BD activa y construye un SchemaMetadata con análisis relacional completo.
