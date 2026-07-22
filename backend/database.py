@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import re
 import sys
+import time
 from urllib.parse import quote_plus
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 from vanna.capabilities.sql_runner import SqlRunner, RunSqlToolArgs
 from vanna.core.tool import ToolContext
@@ -18,15 +22,32 @@ class SqlServerRunner(SqlRunner):
         if "Encrypt=" not in odbc_conn_str:
             odbc_conn_str += ";Encrypt=no"
 
+        if "Connect Timeout=" not in odbc_conn_str and "Connection Timeout=" not in odbc_conn_str:
+            odbc_conn_str += ";Connect Timeout=30"
+
         self.engine = create_engine(
             "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_conn_str),
-            pool_pre_ping=True,
+            poolclass=NullPool,
             future=True,
         )
 
-        # Smoke test
-        with self.engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        # Smoke test con reintentos: en el primer arranque en Render, la red o
+        # la base de datos pueden tardar unos segundos en estar disponibles.
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self.engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                break
+            except Exception:
+                if attempt == max_attempts:
+                    raise
+                wait = 2 ** attempt
+                print(
+                    f"[SQL] Intento {attempt}/{max_attempts} de conexión falló, reintentando en {wait}s...",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
 
         print("[SQL] SqlServerRunner inicializado correctamente", file=sys.stderr)
 
@@ -66,26 +87,51 @@ class SqlServerRunner(SqlRunner):
 
         return sql
 
-    def _is_allowed(self, sql: str) -> bool:
+    _BLOCKED_STARTS = (
+        "insert", "update", "delete", "drop", "alter", "create",
+        "truncate", "exec", "execute", "merge", "grant", "revoke",
+    )
+    _BLOCKED_INLINE = {
+        "xp_cmdshell", "sp_executesql", "openrowset", "opendatasource",
+        "bulk insert", "sys.server_principals", "sys.credentials",
+        "sys.login_token", "sys.sql_logins", "sys.asymmetric_keys",
+    }
+    _STACKED_RE = re.compile(
+        r";\s*(insert|update|delete|drop|alter|create|truncate|exec|execute|merge|grant|revoke)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_allowed(self, sql: str) -> tuple[bool, str]:
         if not sql:
-            return False
+            return False, "SQL vacío"
         lower = sql.lower().lstrip()
 
-        blocked_starts = (
-            "insert", "update", "delete", "drop", "alter", "create",
-            "truncate", "exec", "execute", "merge", "grant", "revoke"
-        )
-        if lower.startswith(blocked_starts):
-            return False
+        if lower.startswith(self._BLOCKED_STARTS):
+            return False, "Solo consultas SELECT están permitidas"
 
-        return lower.startswith("select") or lower.startswith("with")
+        if not (lower.startswith("select") or lower.startswith("with")):
+            return False, "Solo consultas SELECT están permitidas"
+
+        if self._STACKED_RE.search(sql):
+            return False, "Consultas apiladas (stacked queries) no están permitidas"
+
+        if any(kw in lower for kw in self._BLOCKED_INLINE):
+            return False, "La consulta contiene funciones o tablas del sistema no permitidas"
+
+        return True, ""
 
     async def run_sql(self, args: RunSqlToolArgs, context: ToolContext) -> pd.DataFrame:
         sql = self._normalize_sql(args.sql)
-        if not self._is_allowed(sql):
-            raise ValueError("Solo consultas SELECT (y WITH ... SELECT) permitidas")
+        allowed, reason = self._is_allowed(sql)
+        if not allowed:
+            raise ValueError(reason)
 
-        with self.engine.connect() as conn:
-            df = pd.read_sql(text(sql), conn)
-        return df
+        def _query() -> pd.DataFrame:
+            with self.engine.connect() as conn:
+                return pd.read_sql(text(sql), conn)
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_query), timeout=75.0)
+        except asyncio.TimeoutError:
+            raise ValueError("La consulta tardó demasiado (>75s). Intenta reformular la pregunta.")
 

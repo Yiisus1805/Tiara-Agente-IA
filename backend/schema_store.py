@@ -39,9 +39,10 @@ class SchemaVectorStore:
                 "Para esquema local usa embedding_mode='default'"
             )
 
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="paraphrase-multilingual-MiniLM-L12-v2"
-)
+        self.embedding_function = embedding_functions.OpenAIEmbeddingFunction(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model_name="text-embedding-3-small",
+        )
 
         # Si la colección existente no tiene hnsw:space=cosine, la recreamos
         try:
@@ -154,76 +155,9 @@ class SchemaVectorStore:
         return results
 
 
-    def smart_query(
-        self,
-        query_text: str,
-        k_fetch: int = 12,
-        k_final: int = 6,
-    ) -> List[Dict[str, Any]]:
-
-        hits = self.query(query_text, k=k_fetch)
-
-        if not hits:
-            return []
-
-        # Ordenar por similitud descendente
-        hits.sort(key=lambda x: x["score"], reverse=True)
-
-        seen_tables = set()
-        filtered: List[Dict[str, Any]] = []
-
-        for h in hits:
-
-            meta = h.get("meta") or {}
-            table = meta.get("table")
-
-            if table and table in seen_tables:
-                continue
-
-            if table:
-                seen_tables.add(table)
-
-            filtered.append(h)
-
-            if len(filtered) >= k_final:
-                break
-
-        return filtered
-
-
     def count(self) -> int:
 
         try:
             return int(self.col.count())
         except Exception:
             return -1
-
-    def reset(self) -> None:
-        try:
-            self.client.delete_collection(self.collection_name)
-            self.col = self.client.create_collection(
-                name=self.collection_name,
-                embedding_function=self.embedding_function,
-                metadata={
-                    "description": "TIARA SQL schema vector store",
-                    "hnsw:space": "cosine",
-                },
-            )
-        except Exception as e:
-            raise RuntimeError(f"Error reseteando colección: {e}") from e
-
-
-    def preview(self, n: int = 5):
-
-        try:
-
-            res = self.col.get(limit=n)
-
-            docs = res.get("documents", [])
-
-            for i, d in enumerate(docs):
-                print(f"\n--- DOC {i+1} ---\n")
-                print(d[:500])
-
-        except Exception:
-            print("No se pudo mostrar preview")

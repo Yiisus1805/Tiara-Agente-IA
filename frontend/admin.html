@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TIARA — Panel de Administración</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/admin.css">
+<link rel="stylesheet" href="/static/css/sidebar.css">
+</head>
+<body>
+
+<div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+<nav class="sidebar" id="sidebar" aria-hidden="true" aria-label="Menú de navegación">
+  <div class="sidebar-header">
+    <span class="sidebar-title">Menú</span>
+    <button class="sidebar-close" id="sidebar-close" aria-label="Cerrar menú">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="sidebar-links">
+    <a href="/" class="sidebar-link" data-page="chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span>Chat</span>
+    </a>
+    <a href="/admin" class="sidebar-link" data-page="admin">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>Panel de Administración</span>
+    </a>
+  </div>
+  <div class="sidebar-footer">
+    <button class="sidebar-link sidebar-logout" id="sidebar-logout" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      <span>Cerrar sesión</span>
+    </button>
+  </div>
+</nav>
+
+<header>
+  <div class="header-left">
+    <button class="menu-toggle" id="menu-toggle" aria-label="Abrir menú" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <img src="/static/img/SAC-Logo.jpg" class="logo-img" alt="SAC Logo">
+    <div>
+      <div class="header-title">Panel de Administración</div>
+      <div class="header-sub">TIARA — Gestión del conocimiento</div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('cache')">Cache SQL</button>
+    <button class="tab" onclick="switchTab('schema')">Schema Store</button>
+    <button class="tab" onclick="switchTab('logs')">Logs & Auditoría</button>
+  </div>
+
+  <!-- ── Cache SQL ── -->
+  <section id="tab-cache" class="tab-content">
+    <div class="section-header">
+      <div>
+        <h2>Cache SQL</h2>
+        <p class="section-desc">Preguntas cacheadas con su consulta SQL. Elimina entradas incorrectas o agrega correcciones manuales.</p>
+      </div>
+      <button class="btn-primary" onclick="showAddForm()">+ Agregar corrección</button>
+    </div>
+
+    <div id="add-form" class="add-form hidden">
+      <h3>Nueva corrección manual</h3>
+      <label>Pregunta del usuario</label>
+      <input type="text" id="new-question" placeholder="ej. cuánto se vendió en 2013">
+      <label>SQL correcto</label>
+      <textarea id="new-sql" rows="5" placeholder="SELECT ..."></textarea>
+      <div class="form-actions">
+        <button class="btn-primary" onclick="submitCorrection()">Guardar</button>
+        <button class="btn-secondary" onclick="hideAddForm()">Cancelar</button>
+      </div>
+    </div>
+
+    <div class="stats" id="cache-stats"></div>
+    <div class="search-wrap">
+      <input type="text" id="cache-search" placeholder="Buscar pregunta o SQL..." oninput="filterCache()">
+    </div>
+    <div class="table-wrap">
+      <table id="cache-table">
+        <thead>
+          <tr>
+            <th style="width:35%">Pregunta (normalizada)</th>
+            <th style="width:50%">SQL</th>
+            <th style="width:15%">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="cache-body">
+          <tr><td colspan="3" class="loading">Cargando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Schema Store ── -->
+  <section id="tab-schema" class="tab-content hidden">
+    <div class="section-header">
+      <div>
+        <h2>Schema Store</h2>
+        <p class="section-desc">Documentos de esquema en ChromaDB usados para el contexto RAG del agente SQL.</p>
+      </div>
+    </div>
+    <div class="stats" id="schema-stats"></div>
+    <div class="search-wrap">
+      <input type="text" id="schema-search" placeholder="Buscar tabla o documento..." oninput="filterSchema()">
+    </div>
+    <div class="table-wrap">
+      <table id="schema-table">
+        <thead>
+          <tr>
+            <th style="width:20%">Tabla</th>
+            <th style="width:15%">Tipo</th>
+            <th style="width:50%">Documento</th>
+            <th style="width:15%">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="schema-body">
+          <tr><td colspan="4" class="loading">Cargando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Logs & Auditoría ── -->
+  <section id="tab-logs" class="tab-content hidden">
+    <div class="section-header">
+      <div>
+        <h2>Logs & Auditoría</h2>
+        <p class="section-desc">Métricas de uso del sistema en tiempo real.</p>
+      </div>
+      <button class="btn-secondary" onclick="loadLogs()">↺ Actualizar</button>
+    </div>
+    <div class="metrics-grid" id="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-value" id="metric-total">—</div>
+        <div class="metric-label">Total consultas</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-avg">—</div>
+        <div class="metric-label">Tiempo promedio</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-top-intent">—</div>
+        <div class="metric-label">Intención más usada</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" id="metric-success">—</div>
+        <div class="metric-label">Tasa de éxito</div>
+      </div>
+    </div>
+    <div class="intent-breakdown" id="intent-breakdown"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script src="/static/js/sidebar.js"></script>
+<script src="/static/js/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+.shared-body {
+  height: auto;
+  min-height: 100vh;
+  overflow: visible;
+}
+
+.shared-main {
+  overflow: visible;
+  min-height: auto;
+  padding: 24px 40px 60px;
+  gap: 16px;
+}
+
+.shared-note {
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--white);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 14px;
+}
+
+.shared-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.shared-content.hidden,
+.shared-error.hidden {
+  display: none;
+}
+
+.shared-error {
+  text-align: center;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 60px 20px;
+}
+
+/* .msg.user/.msg.bot usan align-items: flex-start/flex-end (burbujas de chat que se
+   ajustan al contenido). Esta página necesita ancho completo para tablas/gráficos,
+   así que forzamos un width explícito — eso tiene prioridad sobre align-items. */
+#shared-question {
+  background: var(--bot-bubble);
+  color: var(--text);
+  width: 100%;
+  max-width: 100%;
+  font-weight: 700;
+}
+
+#shared-answer {
+  width: 100%;
+  max-width: 100%;
+}
+
+.shared-chart {
+  width: 100%;
+  height: 420px;
+  margin-top: 10px;
+}
