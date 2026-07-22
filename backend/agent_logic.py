@@ -45,6 +45,7 @@ from .agent_features import (
     _run_discovery,
     _is_chart_question,
     _is_historical_sales_question,
+    _is_discovery_question,
     _is_vague_analysis,
     _build_chart_payload,
     _generate_analysis,
@@ -187,6 +188,13 @@ async def run_agent_stream_text(
             intent = "SQL"
         if intent == "PREDICTION" and _is_historical_sales_question(original_question):
             logger.info("Reclasificado PREDICTION→SQL: pregunta sobre año histórico en el dataset")
+            intent = "SQL"
+        if intent == "DISCOVERY" and not _is_discovery_question(original_question):
+            # El clasificador ve un mensaje sin contexto (ej. "¿y cuáles de esos son de
+            # EE.UU.?", un seguimiento con pronombres) y a veces lo confunde con DISCOVERY.
+            # Las preguntas de discovery genuinas SIEMPRE contienen palabras clave literales
+            # (DISCOVERY_KEYWORDS) — si no las trae, es casi seguro un falso positivo.
+            logger.info("Reclasificado DISCOVERY→SQL: no contiene palabras clave de discovery")
             intent = "SQL"
         _ctx_intent.set(intent)
         if intent == "CHAT":

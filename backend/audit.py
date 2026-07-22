@@ -62,8 +62,11 @@ def get_summary() -> dict:
         avg_row = con.execute("SELECT AVG(duration_ms) FROM audit_log").fetchone()[0]
         avg_ms = round(avg_row) if avg_row else 0
 
+        # PREDICTION se excluye del desglose: no es una funcionalidad real (el
+        # agente no hace predicciones), esas preguntas solo reciben un rechazo.
         intent_rows = con.execute(
-            "SELECT intent, COUNT(*) as cnt FROM audit_log GROUP BY intent ORDER BY cnt DESC"
+            "SELECT intent, COUNT(*) as cnt FROM audit_log "
+            "WHERE intent != 'PREDICTION' GROUP BY intent ORDER BY cnt DESC"
         ).fetchall()
         intent_counts = {r["intent"]: r["cnt"] for r in intent_rows}
 

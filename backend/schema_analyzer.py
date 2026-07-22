@@ -115,6 +115,8 @@ class SchemaMetadata:
     date_alias:    str = "DD"
     date_year_col: str = "CalendarYear"
     date_key_col:  str = "DateKey"
+    date_min_year: Optional[int] = None
+    date_max_year: Optional[int] = None
 
     union_fact_tables:  list[str] = field(default_factory=list)
     union_common_cols:  list[str] = field(default_factory=list)
@@ -445,6 +447,22 @@ def analyze_schema(cursor=None) -> SchemaMetadata:
                 meta.date_key_col  = "DateKey" if "DateKey" in cols else "FullDateAlternateKey"
                 break
 
+        # Rango real de años con datos — necesario para anclar referencias
+        # relativas ("último año", "últimos N años", "año pasado") al año más
+        # reciente CON DATOS, en vez de a la fecha calendario real actual
+        # (que puede estar muy por delante del rango histórico fijo de la BD).
+        if meta.date_table:
+            try:
+                cursor.execute(
+                    f"SELECT MIN({meta.date_year_col}), MAX({meta.date_year_col}) "
+                    f"FROM {meta.date_schema}.{meta.date_table}"
+                )
+                row = cursor.fetchone()
+                if row and row[0] is not None:
+                    meta.date_min_year, meta.date_max_year = int(row[0]), int(row[1])
+            except Exception:
+                logger.warning("No se pudo determinar el rango de años de %s", meta.date_table)
+
         # Detectar tablas Fact combinables para UNION ALL
         main_facts = [
             n for n in meta.fact_tables
@@ -606,7 +624,18 @@ def build_dynamic_prompt_sections(meta: SchemaMetadata) -> dict[str, str]:
             f"- Si la pregunta NO especifica año: "
             f"WHERE {dta}.{yc} IN (SELECT DISTINCT {yc} FROM {ds}.{meta.date_table})\n"
             f"- Para 'último año disponible': (SELECT MAX({yc}) FROM {ds}.{meta.date_table})\n"
-            f"- Para comparaciones año a año: LAG() OVER (ORDER BY {dta}.{yc})\n"
+            f"- Para 'últimos N años', 'año pasado', 'año anterior' o cualquier rango relativo: "
+            f"ancla SIEMPRE al último año CON DATOS, NUNCA a la fecha calendario real actual "
+            f"(el rango histórico de esta BD es fijo y puede estar muy por detrás de hoy). "
+            f"Usa WHERE {dta}.{yc} >= (SELECT MAX({yc}) FROM {ds}.{meta.date_table}) - (N - 1), "
+            f"donde N es la cantidad de años pedidos (ej. 'últimos 2 años' → N=2 → resta 1).\n"
+            + (
+                f"- Rango real de datos detectado: {meta.date_min_year}-{meta.date_max_year}. "
+                f"Cualquier año literal fuera de ese rango basado en una referencia relativa "
+                f"('reciente', 'pasado', 'últimos años') es un error.\n"
+                if meta.date_min_year is not None else ""
+            )
+            + f"- Para comparaciones año a año: LAG() OVER (ORDER BY {dta}.{yc})\n"
             f"- Si el usuario menciona un año que puede no existir en los datos:\n"
             f"    WHERE {dta}.{yc} = (SELECT MAX({yc}) FROM {ds}.{meta.date_table})\n"
             f"  y menciona en tu respuesta que usas el último año con datos disponibles.\n"
@@ -669,6 +698,14 @@ def build_dynamic_prompt_sections(meta: SchemaMetadata) -> dict[str, str]:
             f"  JOIN dbo.DimXxx D ON AllSales.XxxKey = D.XxxKey  ← CORRECTO\n"
             f"  JOIN dbo.DimXxx D ON D.XxxKey IN (subquery)      ← INCORRECTO\n"
             f"GROUP BY: solo por columnas de dimensión (nunca por columnas clave de AllSales).\n"
+            f"COMPARAR CANALES/FUENTES (ej. 'internet vs reseller'): agrega una columna "
+            f"LITERAL explícita en cada rama del UNION ALL para distinguir el origen, ej.:\n"
+            f"  SELECT {cols_str}, 'Internet' AS Canal FROM {meta.union_fact_tables[0]}\n"
+            f"  UNION ALL SELECT {cols_str}, 'Reseller' AS Canal FROM {meta.union_fact_tables[-1]}\n"
+            f"y agrupa/filtra por esa columna Canal. NUNCA infieras el canal a partir del valor "
+            f"o nulidad de una columna de negocio compartida (ej. SalesTerritoryKey, CustomerKey) "
+            f"— esa columna puede comportarse igual en ambas tablas y el resultado mezclará o "
+            f"vaciará un canal por error.\n"
             + ("\n".join(exceptions) + "\n" if exceptions else "")
             + cust_note
         )

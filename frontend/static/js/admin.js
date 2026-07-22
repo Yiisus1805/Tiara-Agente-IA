@@ -185,7 +185,7 @@ function escHtml(str) {
 // ── Logs & Auditoría ─────────────────────────────────────────────────────────
 
 const INTENT_LABELS = {
-  SQL: "SQL", PREDICTION: "Predicción", DISCOVERY: "Discovery", CHAT: "Chat"
+  SQL: "SQL", DISCOVERY: "Discovery", CHAT: "Chat"
 };
 
 async function loadLogs() {

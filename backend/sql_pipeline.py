@@ -1048,9 +1048,150 @@ def _validate_temporal_filter(sql: str, question: str) -> list[str]:
     ]
 
 
+_RECENT_PERIOD_RE = re.compile(
+    r'\b(último|ultimo|más\s+reciente|mas\s+reciente)\s+a[ñn]o\b'
+    r'|\ba[ñn]o\s+(más\s+reciente|mas\s+reciente|pasado|anterior)\b',
+    re.IGNORECASE,
+)
+_TOP1_DATE_ANTIPATTERN_RE = re.compile(
+    r'\bTOP\s+1\s+\w*Date\w*\b.{0,200}?\bORDER\s+BY\s+\w*Year\w*\s+DESC',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _validate_recent_period_filter(sql: str, question: str) -> list[str]:
+    """Detecta el anti-patrón 'TOP 1 <DateKey> ... ORDER BY <Year> DESC' que el
+    LLM a veces usa para representar 'el último año disponible': eso selecciona
+    una sola fecha (un solo día), no todas las fechas del año más reciente, y
+    subestima drásticamente el total. El validador de filtro temporal general
+    (_validate_temporal_filter) no cubre este caso porque solo se activa cuando
+    la pregunta trae un año explícito (ej. '2016'), no una referencia relativa
+    como 'último año disponible'."""
+    if not _RECENT_PERIOD_RE.search(question):
+        return []
+    if not _TOP1_DATE_ANTIPATTERN_RE.search(sql):
+        return []
+
+    schema_meta = state.SCHEMA_META
+    if schema_meta and schema_meta.date_table:
+        hint = (
+            f"Usa WHERE {schema_meta.date_alias}.{schema_meta.date_year_col} = "
+            f"(SELECT MAX({schema_meta.date_year_col}) FROM "
+            f"{schema_meta.date_schema}.{schema_meta.date_table}) en vez de TOP 1."
+        )
+    else:
+        hint = (
+            "Usa WHERE CalendarYear = (SELECT MAX(CalendarYear) FROM DimDate) "
+            "en vez de TOP 1 sobre la tabla de fechas."
+        )
+    return [
+        "El SQL usa TOP 1 sobre la tabla de fechas para representar 'el último año "
+        "disponible', pero eso selecciona una sola fecha (un solo día), no el año "
+        f"completo, subestimando el total. {hint}"
+    ]
+
+
+_RELATIVE_YEAR_PHRASE_RE = re.compile(
+    r'\b(último|ultimo|últimos|ultimos)\s+\S+\s*a[ñn]os?\b'
+    r'|\ba[ñn]o\s+(pasado|anterior)\b'
+    r'|\ba[ñn]os\s+recientes\b',
+    re.IGNORECASE,
+)
+_LITERAL_YEAR_RE = re.compile(r'\b(19\d{2}|20\d{2})\b')
+
+
+def _validate_year_out_of_range(sql: str, question: str) -> list[str]:
+    """Detecta cuando el SQL usa un año literal (ej. 2024) fuera del rango real
+    de datos de la BD. Esto pasa cuando la pregunta usa una referencia relativa
+    ('últimos dos años', 'año pasado') y el LLM la ancla a la fecha calendario
+    real actual en vez de al último año CON DATOS de esta base — el rango
+    histórico de estas BDs suele quedar muy por detrás de la fecha de hoy.
+
+    Solo se activa si la pregunta NO trae un año explícito: si el usuario
+    escribió '2030' literalmente y no hay datos, la respuesta correcta es un
+    resultado vacío, no una corrección forzada."""
+    if _YEAR_IN_QUESTION_RE.search(question):
+        return []
+    if not _RELATIVE_YEAR_PHRASE_RE.search(question):
+        return []
+
+    schema_meta = state.SCHEMA_META
+    if not schema_meta or schema_meta.date_max_year is None:
+        return []
+
+    years_in_sql = {int(y) for y in _LITERAL_YEAR_RE.findall(sql)}
+    out_of_range = sorted(
+        y for y in years_in_sql
+        if y > schema_meta.date_max_year or y < schema_meta.date_min_year
+    )
+    if not out_of_range:
+        return []
+
+    return [
+        f"El SQL usa el año literal {out_of_range[0]}, pero esta base de datos solo tiene "
+        f"información entre {schema_meta.date_min_year} y {schema_meta.date_max_year}. "
+        "La pregunta usa una referencia relativa (último año, últimos N años, año pasado, etc.) "
+        "que debe anclarse SIEMPRE al último año CON DATOS reales de esta BD, nunca a la fecha "
+        f"calendario real actual. Usa {schema_meta.date_alias}.{schema_meta.date_year_col} >= "
+        f"(SELECT MAX({schema_meta.date_year_col}) FROM {schema_meta.date_schema}.{schema_meta.date_table}) "
+        "- (N-1), sin años literales hardcodeados."
+    ]
+
+
+_FACT_TABLE_REF_RE = re.compile(
+    r'\b(?:FROM|JOIN)\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?(?:\s+(?:AS\s+)?(\w+))?',
+    re.IGNORECASE,
+)
+_DIRECT_FACT_JOIN_ON_RE = re.compile(
+    r'\bJOIN\s+.*?\bON\s+(.+?)(?=\bJOIN\b|\bWHERE\b|\bGROUP\b|\bORDER\b|\)|$)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _validate_no_direct_fact_join(sql: str, question: str) -> list[str]:
+    """Detecta cuando el SQL une DIRECTAMENTE dos fact tables combinables por
+    UNION ALL (ej. FactInternetSales JOIN FactResellerSales ON ...OrderDateKey).
+    Estas tablas comparten grano de fecha pero NO tienen relación 1:1 entre sí —
+    unirlas directamente multiplica filas (fan-out: cada fila de una tabla se
+    combina con TODAS las filas de la otra que comparten esa fecha) e infla los
+    totales de forma masiva y silenciosa, sin que SQL Server reporte error.
+    SIEMPRE deben combinarse con UNION ALL, nunca con JOIN entre sí."""
+    schema_meta = state.SCHEMA_META
+    if not schema_meta or len(schema_meta.union_fact_tables) < 2:
+        return []
+
+    union_set = set(schema_meta.union_fact_tables)
+    alias_to_table: dict[str, str] = {}
+    for m in _FACT_TABLE_REF_RE.finditer(sql):
+        table, alias = m.group(1), m.group(2)
+        if table in union_set:
+            alias_to_table[table] = table
+            if alias:
+                alias_to_table[alias] = table
+
+    if len({v for v in alias_to_table.values()}) < 2:
+        return []
+
+    for jm in _DIRECT_FACT_JOIN_ON_RE.finditer(sql):
+        on_clause = jm.group(1)
+        refs = set(re.findall(r'\b(\w+)\.\w+', on_clause))
+        tables_referenced = {alias_to_table[r] for r in refs if r in alias_to_table}
+        if len(tables_referenced) >= 2:
+            t1, t2 = sorted(tables_referenced)[:2]
+            return [
+                f"El SQL une DIRECTAMENTE {t1} con {t2} (dos fact tables combinables por "
+                "UNION ALL). Estas tablas no tienen relación 1:1 entre sí — unirlas "
+                "directamente multiplica filas (fan-out) e infla los totales de forma "
+                "masiva y silenciosa. Reescribe usando UNION ALL: WITH AllSales AS "
+                f"(SELECT ... FROM {t1} UNION ALL SELECT ... FROM {t2}) y agrega/filtra "
+                "sobre AllSales, NUNCA hagas JOIN entre estas dos tablas."
+            ]
+    return []
+
+
 _CHANNEL_KEYWORD_RE = re.compile(
-    r'\b(online|internet|canal\s+directo|solo\s+online|solo\s+internet'
-    r'|reseller|distribuidor|canal\s+indirecto|solo\s+reseller)\b',
+    r'\b(online|internet|canales?\s+directos?|solo\s+online|solo\s+internet'
+    r'|resellers?|distribuidor(?:es)?|canales?\s+indirectos?|solo\s+resellers?)\b',
     re.IGNORECASE,
 )
 _CUSTOMER_SQL_RE = re.compile(r'\b(DimCustomer|CustomerKey)\b', re.IGNORECASE)
@@ -1198,10 +1339,10 @@ def _validate_sales_source(sql: str, question: str) -> list[str]:
 
 
 _INTERNET_CHANNEL_RE = re.compile(
-    r'\b(online|internet|canal\s+directo|solo\s+online|solo\s+internet)\b', re.IGNORECASE,
+    r'\b(online|internet|canales?\s+directos?|solo\s+online|solo\s+internet)\b', re.IGNORECASE,
 )
 _RESELLER_CHANNEL_RE = re.compile(
-    r'\b(reseller|distribuidor|canal\s+indirecto|solo\s+reseller)\b', re.IGNORECASE,
+    r'\b(resellers?|distribuidor(?:es)?|canales?\s+indirectos?|solo\s+resellers?)\b', re.IGNORECASE,
 )
 
 
@@ -1354,7 +1495,7 @@ def _validate_no_raw_keys(sql: str) -> list[str]:
 
 
 def _sql_validation_problems(sql: str, question: str) -> list[str]:
-    """Corre los 7 validadores semánticos de SQL (sin corregir, sin LLM) y
+    """Corre los 8 validadores semánticos de SQL (sin corregir, sin LLM) y
     devuelve la lista combinada de problemas detectados — fan-out de JOINs,
     estructura de crecimiento, filtro temporal, fuente de ventas incompleta o
     de más, columnas *Key expuestas, tablas de benchmark. Usado tanto por
@@ -1363,8 +1504,11 @@ def _sql_validation_problems(sql: str, question: str) -> list[str]:
     sin gastar una llamada al LLM en el camino rápido de caché)."""
     return [
         *_validate_sql_joins(sql),
+        *_validate_no_direct_fact_join(sql, question),
         *_validate_growth_structure(sql),
         *_validate_temporal_filter(sql, question),
+        *_validate_recent_period_filter(sql, question),
+        *_validate_year_out_of_range(sql, question),
         *_validate_sales_source(sql, question),
         *_validate_channel_scope(sql, question),
         *_validate_no_raw_keys(sql),
